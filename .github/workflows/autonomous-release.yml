@@ -123,11 +123,47 @@ jobs:
           flutter --version
           java -version
 
+      # ===== 新增：安装并固定 NDK 28.2.13676358 =====
+      - name: 安装并固定 NDK 28.2.13676358
+        if: steps.tag.outputs.exists == 'false'
+        working-directory: upstream
+        run: |
+          set -e
+          source tooling/env.sh
+          NDK_VERSION="28.2.13676358"
+          SDK_ROOT="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-}}"
+          if [ -z "$SDK_ROOT" ]; then
+            SDKMANAGER="$(command -v sdkmanager || true)"
+            if [ -n "$SDKMANAGER" ]; then
+              SDK_ROOT="$(cd "$(dirname "$SDKMANAGER")/../../.." && pwd)"
+            fi
+          fi
+          SDKMANAGER="$SDK_ROOT/cmdline-tools/latest/bin/sdkmanager"
+          if [ ! -x "$SDKMANAGER" ]; then
+            SDKMANAGER="$(command -v sdkmanager || true)"
+          fi
+          test -n "$SDK_ROOT"
+          test -x "$SDKMANAGER"
+          yes | "$SDKMANAGER" --licenses >/dev/null 2>&1 || true
+          yes | "$SDKMANAGER" --sdk_root="$SDK_ROOT" --install "ndk;$NDK_VERSION" >/dev/null
+          NDK_DIR="$SDK_ROOT/ndk/$NDK_VERSION"
+          test -d "$NDK_DIR"
+          echo "ANDROID_NDK_HOME=$NDK_DIR" >> "$GITHUB_ENV"
+          echo "ANDROID_NDK_ROOT=$NDK_DIR" >> "$GITHUB_ENV"
+          echo "ANDROID_NDK=$NDK_DIR" >> "$GITHUB_ENV"
+          for f in app/android/app/build.gradle.kts app/android/app/build.gradle; do
+            [ -f "$f" ] && sed -i -E 's/ndkVersion[[:space:]]*=[[:space:]]*"[^"]*"/ndkVersion = "'"$NDK_VERSION"'"/' "$f" || true
+          done
+      # ===== 新增结束 =====
+
       - name: 生成运行时 rootfs
         if: steps.tag.outputs.exists == 'false'
         working-directory: upstream
         run: |
           source tooling/env.sh
+          export ANDROID_NDK_HOME="$ANDROID_HOME/ndk/28.2.13676358"
+          export ANDROID_NDK_ROOT="$ANDROID_NDK_HOME"
+          export ANDROID_NDK="$ANDROID_NDK_HOME"
           bash runtime/build-runtime.sh arm64-v8a
 
       - name: 从 Secrets 恢复发布密钥
@@ -159,6 +195,9 @@ jobs:
           DSH_WORKSHOP_ORIGIN: ${{ vars.DSH_WORKSHOP_ORIGIN }}
         run: |
           source tooling/env.sh
+          export ANDROID_NDK_HOME="$ANDROID_HOME/ndk/28.2.13676358"
+          export ANDROID_NDK_ROOT="$ANDROID_NDK_HOME"
+          export ANDROID_NDK="$ANDROID_NDK_HOME"
           # 使 update.json、page 与 gh 命令均指向本仓库
           export DSH_RELEASE_REPO="$SELF_REPO"
           bash tooling/build-apk.sh -f arm64 \
