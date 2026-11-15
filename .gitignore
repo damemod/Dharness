@@ -1,0 +1,19 @@
+# 本仓库仅跟踪自动发版所必需的文件；本地维护资料不纳入版本控制。
+# 具体见 README.md。
+
+# 本地说明与决策记录
+README.txt
+docs/
+
+# 本地美术工具、规格与校验脚本（CI 只读取其产物，不运行这些脚本）
+assets/AI_IMAGE_PROMPTS.md
+assets/gen_placeholders.py
+assets/validate_placeholders.py
+assets/make_star_from_art.py
+assets/brand/
+
+# Python / 编辑器临时文件
+*.pyc
+__pycache__/
+*.swp
+.DS_Store

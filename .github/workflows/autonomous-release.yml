@@ -1,0 +1,200 @@
+# 自动跟随上游 dsh-Go 版本 tag 重构建，并用本仓库密钥签名发布。
+# 触发: 上游发布新 tag 时自动执行；或手动指定 tag；或每日定时兜底。
+# 构建全过程在 GitHub runner 完成，不依赖本地工具链。
+name: autonomous-release
+
+on:
+  workflow_dispatch:
+    inputs:
+      upstream_tag:
+        description: "上游 tag，如 v1.1.0；留空取上游最新 release tag"
+        required: false
+  schedule:
+    - cron: "23 5 * * *"
+  repository_dispatch:
+    types: [upstream-release]
+
+permissions:
+  contents: write
+
+env:
+  UPSTREAM_REPO: ccch1mneyyy/dsh-Go
+  SELF_REPO: ${{ github.repository }}
+  FLUTTER_VERSION: "3.47.7"
+  NODE_VERSION: "24.22.1"
+
+jobs:
+  build-and-release:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    steps:
+      - name: 检出本仓库（改造补丁与素材）
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          path: self
+
+      - name: 解析上游 tag 并查重
+        id: tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+          INPUT_TAG: ${{ github.event.inputs.upstream_tag }}
+        run: |
+          set -euo pipefail
+          if [ -n "${INPUT_TAG:-}" ]; then
+            TAG="$INPUT_TAG"
+          else
+            TAG=$(gh api "repos/$UPSTREAM_REPO/releases/latest" --jq .tag_name)
+          fi
+          # 本流程仅处理 dsh-Go 的 vX.Y.Z 版本 tag
+          case "$TAG" in v*) ;; *) echo "tag 不属于 dsh-Go 版本格式: $TAG"; exit 1;; esac
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          if gh api "repos/$SELF_REPO/git/ref/tags/$TAG" >/dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: 已发过则跳过
+        if: steps.tag.outputs.exists == 'true'
+        run: echo "该 tag 已存在于本仓库，跳过本次构建"
+
+      - name: 检出上游源码
+        if: steps.tag.outputs.exists == 'false'
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.UPSTREAM_REPO }}
+          ref: ${{ steps.tag.outputs.tag }}
+          persist-credentials: false
+          path: upstream
+
+      - name: 覆盖品牌与美术素材
+        id: assets
+        if: steps.tag.outputs.exists == 'false'
+        run: |
+          set -euo pipefail
+          if [ ! -d self/assets ]; then
+            echo "本仓库无 assets/ 目录，跳过素材覆盖；对外发布前需补齐自有素材。"
+            exit 0
+          fi
+          # 纯图片目录：按上游 ASSETS.md 列出的路径覆盖
+          # 目录可能不存在，用条件判断避免 set -e 下中断
+          [ -d self/assets/whale ]    && { cp -a self/assets/whale/.    upstream/app/assets/whale/; } || true
+          [ -d self/assets/star ]     && { cp -a self/assets/star/.     upstream/app/assets/star/; } || true
+          [ -d self/assets/site ]     && { cp -a self/assets/site/.     upstream/site/home/dist/assets/; } || true
+          [ -d self/assets/docs ]     && { cp -a self/assets/docs/.     upstream/docs/assets/; } || true
+          # 启动图标：assets/launcher/ 下按 mipmap-*/、drawable/ 组织，整体覆盖 res/
+          [ -d self/assets/launcher ] && { cp -a self/assets/launcher/.  upstream/app/android/app/src/main/res/; } || true
+          # 品牌 glyph：上游生成器要求 SVG 带指定 path id 与渐变，位图素材不满足；
+          # 此处直接覆盖其生成的 Dart 文件。
+          if [ -f self/assets/brand_glyph.g.dart ]; then
+            cp -f self/assets/brand_glyph.g.dart upstream/app/lib/ui/shell/brand_glyph.g.dart
+          else
+            echo "警告：未提供 assets/brand_glyph.g.dart，App 内保留上游品牌标识。"
+          fi
+          # 桌宠包：不运行上游 make_pet_pack.py（该生成器硬编码源格式并带交叉校验）。
+          # 保留 deepy-whale / whale-girl 两个目录名，整目录覆盖为自有合规包。
+          # 这样 pubspec.yaml / pet_prefs.dart / pet_picker.dart / companion_chrome.dart
+          # 及全部 test/fixture 的引用均原样工作，无需修改源码；上游后续调整这些 .dart
+          # 也不会使本流程依赖的精确行匹配失效。
+          if [ -d self/assets/pets ]; then
+            rm -rf upstream/app/assets/pets
+            cp -a self/assets/pets upstream/app/assets/pets
+          else
+            echo "警告：未提供 assets/pets/，App 内保留上游桌宠素材。"
+          fi
+          echo "素材覆盖完成；brand_glyph.g.dart 与 pets/*/pack.json 应不含上游名称与授权声明。"
+
+      - name: 应用最小改造补丁
+        if: steps.tag.outputs.exists == 'false'
+        run: |
+          set -euo pipefail
+          # 仅修改两处必需常量：updateRepo 与 release_assets.py 的 REPO
+          # （否则编译期 dart-define 与环境变量会被硬编码值忽略）。
+          # 素材为纯文件覆盖，更新端点由后续 dart-define 统一指向本仓库。
+          python3 self/patches/apply_autonomous.py upstream "$SELF_REPO"
+
+      - name: 安装工具链（由上游脚本负责）
+        if: steps.tag.outputs.exists == 'false'
+        working-directory: upstream
+        run: |
+          bash tooling/setup-toolchain.sh
+          source tooling/env.sh
+          flutter --version
+          java -version
+
+      - name: 生成运行时 rootfs
+        if: steps.tag.outputs.exists == 'false'
+        working-directory: upstream
+        run: |
+          source tooling/env.sh
+          bash runtime/build-runtime.sh arm64-v8a
+
+      - name: 从 Secrets 恢复发布密钥
+        if: steps.tag.outputs.exists == 'false'
+        env:
+          KEYSTORE_B64: ${{ secrets.RELEASE_KEYSTORE_B64 }}
+        run: |
+          set -euo pipefail
+          if [ -z "$KEYSTORE_B64" ]; then echo "缺少 RELEASE_KEYSTORE_B64"; exit 1; fi
+          mkdir -p upstream/app/android
+          umask 077
+          printf '%s' "$KEYSTORE_B64" | base64 -d > upstream/app/android/release.jks
+          cat > upstream/app/android/key.properties <<EOF
+          storeFile=release.jks
+          storePassword=${{ secrets.RELEASE_STORE_PASSWORD }}
+          keyAlias=${{ secrets.RELEASE_KEY_ALIAS }}
+          keyPassword=${{ secrets.RELEASE_KEY_PASSWORD }}
+          EOF
+          chmod 600 upstream/app/android/key.properties
+
+      - name: 构建并自签名 APK
+        if: steps.tag.outputs.exists == 'false'
+        working-directory: upstream
+        env:
+          DSH_UPDATE_REPO: ${{ env.SELF_REPO }}
+          DSH_UPDATE_MIRROR: ""
+          DSH_UPDATE_MIRRORS: ""
+          DSH_UPDATE_FEED: ${{ vars.DSH_UPDATE_FEED }}
+          DSH_WORKSHOP_ORIGIN: ${{ vars.DSH_WORKSHOP_ORIGIN }}
+        run: |
+          source tooling/env.sh
+          # 使 update.json、page 与 gh 命令均指向本仓库
+          export DSH_RELEASE_REPO="$SELF_REPO"
+          bash tooling/build-apk.sh -f arm64 \
+            -- --dart-define=DSH_UPDATE_REPO="$DSH_UPDATE_REPO" \
+               --dart-define=DSH_UPDATE_MIRROR= \
+               --dart-define=DSH_UPDATE_MIRRORS= \
+               --dart-define=DSH_UPDATE_FEED="$DSH_UPDATE_FEED" \
+               --dart-define=DSH_WORKSHOP_ORIGIN="$DSH_WORKSHOP_ORIGIN"
+          # 打印并校验签名证书信息
+          APK=app/build/app/outputs/flutter-apk/app-arm64-release.apk
+          apksigner verify --min-sdk-version 21 --print-certs "$APK"
+
+      - name: 生成发布资产（update.json / SHA256SUMS / 可选增量补丁）
+        if: steps.tag.outputs.exists == 'false'
+        working-directory: upstream
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DSH_RELEASE_REPO: ${{ env.SELF_REPO }}
+        run: |
+          python3 tooling/release_assets.py --delta-from 0
+
+      - name: 发布到本仓库 Release
+        if: steps.tag.outputs.exists == 'false'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.tag.outputs.tag }}
+        run: |
+          set -euo pipefail
+          cd upstream
+          VERSION="${TAG#v}"
+          TITLE="DSH Go ${VERSION} (self-signed)"
+          gh release create "$TAG" dist/* \
+            --repo "$SELF_REPO" \
+            --title "$TITLE" \
+            --notes "自动跟随上游 $UPSTREAM_REPO@$TAG，用本仓库自有密钥重签并发布。引擎版本与补丁集与上游该 tag 一致。"
+
+      - name: 清理密钥
+        if: always()
+        run: rm -f upstream/app/android/release.jks upstream/app/android/key.properties || true

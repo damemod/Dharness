@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Self-made neutral themed-icon silhouette (placeholder geometry). -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <path android:fillColor="#FFFFFFFF"
+        android:pathData="M28,46 L34,20 L52,38 Z M80,46 L74,20 L56,38 Z
+        M54,36 C70,36 84,48 84,64 C84,80 70,92 54,92
+        C38,92 24,80 24,64 C24,48 38,36 54,36 Z" />
+</vector>

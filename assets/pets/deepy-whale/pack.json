@@ -1,0 +1,26 @@
+{
+  "schema": 1,
+  "id": "deepy-whale",
+  "name": "待机 · 占位图形",
+  "author": "Dharness autonomous build",
+  "license": "原创占位图形，随本仓库按 AGPL-3.0 一同提供",
+  "source": "程序绘制的中性几何占位图形，非任何第三方形象",
+  "pixelArt": false,
+  "scale": 1,
+  "canvas": { "w": 52, "h": 52 },
+  "anchor": { "x": 26, "baseline": 48 },
+  "contentBox": { "x": 12, "y": 26, "w": 28, "h": 20 },
+  "animations": {
+    "idle": {
+      "sheet": "idle.png",
+      "frameW": 28,
+      "frameH": 20,
+      "cols": 1,
+      "box": { "x": 12, "y": 26, "w": 28, "h": 20 },
+      "loop": true,
+      "ms": 1000,
+      "frames": [ { "i": 0, "ms": 1000 } ]
+    }
+  },
+  "states": { "idle": [ "idle" ] }
+}
