@@ -216,6 +216,12 @@ jobs:
           DSH_WORKSHOP_ORIGIN: ${{ vars.DSH_WORKSHOP_ORIGIN }}
         run: |
           source tooling/env.sh
+          # env.sh 的 PATH 没有 build-tools，apksigner/aapt2 都在这里
+          if [ -d "$ANDROID_HOME/build-tools" ]; then
+            BT=$(ls -1 "$ANDROID_HOME/build-tools" | sort -V | tail -n1)
+            export PATH="$ANDROID_HOME/build-tools/$BT:$PATH"
+            echo "build-tools: $BT"
+          fi
           # 使 update.json、page 与 gh 命令均指向本仓库
           export DSH_RELEASE_REPO="$SELF_REPO"
           bash tooling/build-apk.sh -f arm64 \
