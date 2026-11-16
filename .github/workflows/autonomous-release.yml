@@ -177,7 +177,7 @@ jobs:
           umask 077
           printf '%s' "$KEYSTORE_B64" | base64 -d > upstream/app/android/release.jks
           cat > upstream/app/android/key.properties <<EOF
-          storeFile=release.jks
+          storeFile=../release.jks
           storePassword=${{ secrets.RELEASE_STORE_PASSWORD }}
           keyAlias=${{ secrets.RELEASE_KEY_ALIAS }}
           keyPassword=${{ secrets.RELEASE_KEY_PASSWORD }}
