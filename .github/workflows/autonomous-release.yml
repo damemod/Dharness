@@ -312,9 +312,16 @@ jobs:
         run: |
           set -euo pipefail
           cp artifact/app-arm64-debug.apk keys/app.apk
-          # 去掉 v1 的 JAR 签名文件；v2/v3 在 signing block，由 apksigner sign 整包替换
+          # 去掉 v1 的 JAR 签名文件；v2/v3 在 signing block，由 apksigner sign 整包替换。
+          # zip: 0=删掉了旧签名；12=包里没有匹配的 v1 文件（可接受）；其它退出码=disk/格式错误，必须失败。
+          set +e
           zip -d keys/app.apk 'META-INF/*.RSA' 'META-INF/*.SF' 'META-INF/*.MF' \
-                             'META-INF/*.DSA' 'META-INF/*.EC' || true
+                             'META-INF/*.DSA' 'META-INF/*.EC'
+          ZIP_RC=$?
+          set -e
+          if [ "$ZIP_RC" -ne 0 ] && [ "$ZIP_RC" -ne 12 ]; then
+            echo "剥离旧 v1 签名失败（zip 退出码 $ZIP_RC），拒绝发布"; exit 1
+          fi
           # keytool 默认 PKCS12：私钥口令与库口令同值，-keypass 被忽略
           apksigner sign \
             --ks keys/release.jks \
@@ -328,20 +335,40 @@ jobs:
           echo "重签完成"
 
       - name: 签名门禁校验
+        env:
+          # 可选：证书 SHA-256 固定值（--print-certs 输出的那一串十六进制）。
+          # 设置了则强制比对（证书漂移=换钥/被替签，拒绝发布）；未设置仅告警。
+          EXPECTED_CERT_SHA256: ${{ vars.RELEASE_CERT_SHA256 }}
         run: |
           set -euo pipefail
           CERTS=$(apksigner verify -v --min-sdk-version 21 --print-certs keys/app.apk)
           printf '%s\n' "$CERTS"
-          # docs/release.md:95 门禁：v1/v2/v3 都要 true，证书主题不得含 CN=Android Debug
+          # docs/release.md:95 门禁：v1/v2/v3 都要 true，证书主题不得含 CN=Android Debug。
+          # 用正向断言（必须出现 ": true"）：apksigner 输出格式变化或缺行时，
+          # 反向查 ": false" 会漏检，正向断言会失败，属 fail-closed。
+          # apksigner 每行形如 "Verified using v1 scheme (JAR signing): true"，
+          # scheme 与冒号之间有括号说明，故用 .* 跨过它，锚定 ": true" 结尾。
           for n in v1 v2 v3; do
-            if printf '%s' "$CERTS" | grep -E "Verified using ${n} scheme" | grep -q ': false'; then
-              echo "${n} 签名缺失，拒绝发布"; exit 1
+            if ! printf '%s' "$CERTS" | grep -Eq "Verified using ${n} scheme.*: true"; then
+              echo "${n} 签名未验证为 true（缺失或格式异常），拒绝发布"; exit 1
             fi
           done
           if printf '%s' "$CERTS" | grep -qi 'CN=Android Debug'; then
             echo "签名仍是 Android Debug，拒绝发布"; exit 1
           fi
-          echo "签名校验通过：v1/v2/v3 完整，且非 debug 证书"
+          if [ -n "${EXPECTED_CERT_SHA256:-}" ]; then
+            # --print-certs 里证书指纹行形如 "Certificate SHA-256 digest: ab:cd:..." 或连续十六进制；
+            # 去掉冒号与空白后做大小写无关子串比对。
+            DIGESTS=$(printf '%s' "$CERTS" | grep -i 'SHA-256' | tr -d ' :')
+            EXPECT=$(printf '%s' "$EXPECTED_CERT_SHA256" | tr -d ' :' | tr 'A-Z' 'a-z')
+            if ! printf '%s' "$DIGESTS" | tr 'A-Z' 'a-z' | grep -q "$EXPECT"; then
+              echo "证书 SHA-256 与固定值不一致，拒绝发布"; exit 1
+            fi
+            echo "证书 SHA-256 与固定值一致"
+          else
+            echo "::warning::未设置 RELEASE_CERT_SHA256 Variable，未做证书指纹固定校验（首次发布后建议补上）。"
+          fi
+          echo "签名校验通过：v1/v2/v3 均为 true，非 debug 证书"
 
       - name: 用自持脚本生成发布资产
         env:

@@ -123,11 +123,14 @@ def build_plan(root, repo, with_dex, telemetry_off, single_market, lazy_relay, f
         ))
 
     # 2c 可选：插件市场索引收敛为单一来源。
-    #     上游默认并列多个索引，条目口径可能重叠。做法是把官方索引地址与基址置空，
-    #     并把唯一的异常出口 throw failure! 换成返回空目录：基址为空后循环不执行、
-    #     failure 为 null，若不改这里会抛 TypeError。返回空目录后 marketAllProvider
-    #     合并结果即只剩另一路索引，语义与注释一致，且函数结构/辅助函数全部保留，
-    #     没有 dead code，也不在任何常量里保留外部域名。
+    #     上游默认并列多个索引，条目口径可能重叠。做法是把官方索引地址与基址置空、
+    #     把唯一的异常出口 throw failure! 换成返回空目录（基址为空后循环不执行、
+    #     failure 为 null，否则会抛 TypeError）；此外必须堵住两处从本机缓存复活
+    #     官方目录的分支：存量设备 SharedPreferences 里若留有 market.official 缓存，
+    #     基址置空后 :291（缓存未过期）与 :302（离线回落）仍会返回旧官方条目，
+    #     绕过单源。四处都改后 marketAllProvider 合并结果才真正只剩另一路索引。
+    #     函数结构与辅助函数全部保留，无 dead code，也不在任何常量里保留外部域名。
+    #     两处缓存分支用带 if 前缀的完整行做锚点，各自唯一。
     if single_market:
         plan.append((
             "app/lib/state/plugins/plugin_market.dart",
@@ -143,6 +146,22 @@ def build_plan(root, repo, with_dex, telemetry_off, single_market, lazy_relay, f
             "app/lib/state/plugins/plugin_market.dart",
             "  throw failure!;",
             "  return MarketCatalog(MarketIndex(url: Uri.parse(officialIndexUrl), title: LocalizedText.plain('插件市场')));",
+        ))
+        # 缓存未过期分支（:291-293）：把返回旧缓存目录换成中性空目录
+        plan.append((
+            "app/lib/state/plugins/plugin_market.dart",
+            "  if (copy != null && !refresh && DateTime.now().difference(copy.at) < officialMarketFresh) {\n"
+            "    return _officialCatalog(copy.index, parseMarketSidecarText(copy.sidecar));\n"
+            "  }",
+            "  if (copy != null && !refresh && DateTime.now().difference(copy.at) < officialMarketFresh) {\n"
+            "    return MarketCatalog(MarketIndex(url: Uri.parse(officialIndexUrl), title: LocalizedText.plain('插件市场')));\n"
+            "  }",
+        ))
+        # 离线回落分支（:302）：整行唯一锚点
+        plan.append((
+            "app/lib/state/plugins/plugin_market.dart",
+            "  if (copy != null) return _officialCatalog(copy.index, parseMarketSidecarText(copy.sidecar));",
+            "  if (copy != null) return MarketCatalog(MarketIndex(url: Uri.parse(officialIndexUrl), title: LocalizedText.plain('插件市场')));",
         ))
 
     # 2d 可选：远程登录方式改为按需获取（进入登录页时才取）。
