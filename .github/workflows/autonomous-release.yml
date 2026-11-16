@@ -1,6 +1,15 @@
-# 自动跟随上游 dsh-Go 版本 tag 重构建，并用本仓库密钥签名发布。
-# 触发: 上游发布新 tag 时自动执行；或手动指定 tag；或每日定时兜底。
-# 构建全过程在 GitHub runner 完成，不依赖本地工具链。
+# 路线 B：构建与签名发布分离。
+#
+# 安全模型：
+#   - job1 build（不可信区）：执行上游检出与构建脚本，但 permissions 仅 contents:read，
+#     完全不接触任何 Secret / 签名密钥 / 发布 token。产物是无发布凭据的 debug 签名 APK。
+#   - job2 sign-publish（可信区）：只消费 job1 的 APK 产物 + 版本元数据，
+#     不 checkout 上游源码、不执行任何上游脚本；从 Secrets 恢复自有 release.jks，
+#     剥离 debug 签名后用自有密钥重签、跑门禁校验、用自持脚本生成发布资产并发布。
+#     仅该 job 获得 contents:write 与全部 4 个密钥 Secret。
+#   这样上游构建代码永远运行在接触不到发布凭据的环境里。
+#
+# 触发: 上游发布新 tag 自动执行 / 手动指定 tag / 每日定时兜底。
 name: autonomous-release
 
 on:
@@ -14,29 +23,32 @@ on:
   repository_dispatch:
     types: [upstream-release]
 
-# 定时、手动、repository_dispatch 可能同时触发同一个 tag。
-# concurrency 不支持引用 steps 输出，无法按运行时解析的 tag 动态分组；
-# 用固定 group + cancel-in-progress: false 让所有触发全局串行：
-# 第一个运行创建 Release 后，后续运行在查重步骤看到 tag 已存在即跳过。
+# 全局串行：定时/手动/repository_dispatch 可能同时触发同一个 tag；
+# concurrency 不支持引用 steps 输出，故用固定 group + cancel-in-progress:false，
+# 第一个运行发布后，后续运行在查重步骤跳过。
 concurrency:
   group: autonomous-release
   cancel-in-progress: false
-
-permissions:
-  contents: write
 
 env:
   UPSTREAM_REPO: ccch1mneyyy/dsh-Go
   SELF_REPO: ${{ github.repository }}
   FLUTTER_VERSION: "3.47.7"
   NODE_VERSION: "24.22.1"
-  # tawcroot 硬性要求的 NDK 版本，与 runtime/tawcroot/source.json 中的 ndkVersion 一致
-  TAWCROOT_NDK_VERSION: "28.2.13676358"
+  TAWCROOT_NDK_VERSION: "28.2.13676358"   # 与 runtime/tawcroot/source.json:8 一致
 
 jobs:
-  build-and-release:
+  # ============================================================
+  # job1 build：不可信区，跑上游脚本，无密钥、无写权限
+  # ============================================================
+  build:
     runs-on: ubuntu-24.04
     timeout-minutes: 180
+    permissions:
+      contents: read
+    outputs:
+      tag: ${{ steps.tag.outputs.tag }}
+      exists: ${{ steps.tag.outputs.exists }}
     steps:
       - name: 检出本仓库（改造补丁与素材）
         uses: actions/checkout@v4
@@ -56,10 +68,11 @@ jobs:
           else
             TAG=$(gh api "repos/$UPSTREAM_REPO/releases/latest" --jq .tag_name)
           fi
-          # 本流程仅处理 dsh-Go 的 vX.Y.Z 版本 tag
           case "$TAG" in v*) ;; *) echo "tag 不属于 dsh-Go 版本格式: $TAG"; exit 1;; esac
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
-          if gh api "repos/$SELF_REPO/git/ref/tags/$TAG" >/dev/null 2>&1; then
+          # 查重以 Release 为准（不是 git tag）：避免上次"tag 建成、Release 未建成"
+          # 中途崩溃导致下次误判已发布、Release 永久补不回来。
+          if gh release view "$TAG" --repo "$SELF_REPO" >/dev/null 2>&1; then
             echo "exists=true" >> "$GITHUB_OUTPUT"
           else
             echo "exists=false" >> "$GITHUB_OUTPUT"
@@ -67,7 +80,7 @@ jobs:
 
       - name: 已发过则跳过
         if: steps.tag.outputs.exists == 'true'
-        run: echo "该 tag 已存在于本仓库，跳过本次构建"
+        run: echo "该 tag 在本仓库已有 Release，跳过本次构建"
 
       - name: 检出上游源码
         if: steps.tag.outputs.exists == 'false'
@@ -79,56 +92,34 @@ jobs:
           path: upstream
 
       - name: 覆盖品牌与美术素材
-        id: assets
         if: steps.tag.outputs.exists == 'false'
         run: |
           set -euo pipefail
           if [ ! -d self/assets ]; then
-            echo "本仓库无 assets/ 目录，跳过素材覆盖；对外发布前需补齐自有素材。"
-            exit 0
+            echo "本仓库无 assets/ 目录，跳过素材覆盖。"; exit 0
           fi
-          # 纯图片目录：按上游 ASSETS.md 列出的路径覆盖
-          # 目录可能不存在，用条件判断避免 set -e 下中断
-          [ -d self/assets/whale ]    && { cp -a self/assets/whale/.    upstream/app/assets/whale/; } || true
-          [ -d self/assets/star ]     && { cp -a self/assets/star/.     upstream/app/assets/star/; } || true
-          [ -d self/assets/site ]     && { cp -a self/assets/site/.     upstream/site/home/dist/assets/; } || true
-          [ -d self/assets/docs ]     && { cp -a self/assets/docs/.     upstream/docs/assets/; } || true
-          # 启动图标：assets/launcher/ 下按 mipmap-*/、drawable/ 组织，整体覆盖 res/
-          [ -d self/assets/launcher ] && { cp -a self/assets/launcher/.  upstream/app/android/app/src/main/res/; } || true
-          # 品牌 glyph：上游生成器要求 SVG 带指定 path id 与渐变，位图素材不满足；
-          # 此处直接覆盖其生成的 Dart 文件。
+          [ -d self/assets/whale ]    && { cp -a self/assets/whale/.   upstream/app/assets/whale/; } || true
+          [ -d self/assets/star ]     && { cp -a self/assets/star/.    upstream/app/assets/star/; }  || true
+          [ -d self/assets/site ]     && { cp -a self/assets/site/.    upstream/site/home/dist/assets/; } || true
+          [ -d self/assets/docs ]     && { cp -a self/assets/docs/.    upstream/docs/assets/; } || true
+          [ -d self/assets/launcher ] && { cp -a self/assets/launcher/. upstream/app/android/app/src/main/res/; } || true
           if [ -f self/assets/brand_glyph.g.dart ]; then
             cp -f self/assets/brand_glyph.g.dart upstream/app/lib/ui/shell/brand_glyph.g.dart
-          else
-            echo "警告：未提供 assets/brand_glyph.g.dart，App 内保留上游品牌标识。"
           fi
-          # 桌宠包：不运行上游 make_pet_pack.py（该生成器硬编码源格式并带交叉校验）。
-          # 保留 deepy-whale / whale-girl 两个目录名，整目录覆盖为自有合规包。
-          # 这样 pubspec.yaml / pet_prefs.dart / pet_picker.dart / companion_chrome.dart
-          # 及全部 test/fixture 的引用均原样工作，无需修改源码；上游后续调整这些 .dart
-          # 也不会使本流程依赖的精确行匹配失效。
+          # 桌宠：保留 deepy-whale/whale-girl 目录名整目录覆盖，零源码 patch
           if [ -d self/assets/pets ]; then
             rm -rf upstream/app/assets/pets
             cp -a self/assets/pets upstream/app/assets/pets
-          else
-            echo "警告：未提供 assets/pets/，App 内保留上游桌宠素材。"
           fi
-          echo "素材覆盖完成；brand_glyph.g.dart 与 pets/*/pack.json 应不含上游名称与授权声明。"
+          echo "素材覆盖完成"
 
       - name: 应用最小改造补丁
         if: steps.tag.outputs.exists == 'false'
         run: |
           set -euo pipefail
-          # 仅修改两处必需常量：updateRepo 与 release_assets.py 的 REPO
-          # （否则编译期 dart-define 与环境变量会被硬编码值忽略）。
-          # 素材为纯文件覆盖，更新端点由后续 dart-define 统一指向本仓库。
           python3 self/patches/apply_autonomous.py upstream "$SELF_REPO"
 
-      # ===== 缓存工具链：Flutter / JDK / Android SDK / 下载缓存 =====
-      # key 里带 setup-toolchain.sh 与 tawcroot source.json 的 hash：
-      # 上游改安装逻辑或 NDK 版本，缓存自动失效重建；没改则命中，setup 幂等跳过。
-      - name: 缓存工具链（Android SDK / Flutter / JDK）
-        id: toolchain-cache
+      - name: 缓存工具链
         if: steps.tag.outputs.exists == 'false'
         uses: actions/cache@v4
         with:
@@ -141,37 +132,25 @@ jobs:
           restore-keys: |
             toolchain-v1-${{ runner.os }}-flutter${{ env.FLUTTER_VERSION }}-
 
-      # ===== 安装工具链：NDK 固定、禁用 emulator + system-image =====
-      # 1) sed 把 NDK_VERSION= 改成 tawcroot 要求的 28.2.13676358，只装一份；
-      # 2) sed 删掉 sdkmanager 参数里的 "emulator" "$SYSTEM_IMAGE"，省约 1.5 GB 下载；
-      # 3) 安装完把 ANDROID_NDK_HOME 等写进 GITHUB_ENV，后续 build.py 第一优先级命中。
-      # 只改 runner 上的临时副本，不提交回上游。
       - name: 安装工具链（NDK 固定、禁用 emulator/system-image）
         if: steps.tag.outputs.exists == 'false'
         working-directory: upstream
         run: |
           set -euo pipefail
-          # 1) 固定 NDK 版本
           sed -i -E "s|^NDK_VERSION=.*$|NDK_VERSION=\"${TAWCROOT_NDK_VERSION}\"|" tooling/setup-toolchain.sh
-          # 2) 禁用 emulator + system-image（release 构建不需要）
           sed -i 's/"emulator" "$SYSTEM_IMAGE"//g' tooling/setup-toolchain.sh
           sed -i 's/"emulator"//g' tooling/setup-toolchain.sh
-          echo "== setup-toolchain.sh 关键行 =="
-          grep -nE '^NDK_VERSION=|sdkmanager --sdk_root' -A2 tooling/setup-toolchain.sh || true
-
           bash tooling/setup-toolchain.sh
           source tooling/env.sh
           flutter --version
           java -version
-
-          echo "== 已安装的 NDK =="
           ls -1 "$ANDROID_HOME/ndk/" 2>/dev/null || true
           test -d "$ANDROID_HOME/ndk/${TAWCROOT_NDK_VERSION}"
           echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/${TAWCROOT_NDK_VERSION}" >> "$GITHUB_ENV"
           echo "ANDROID_NDK_ROOT=$ANDROID_HOME/ndk/${TAWCROOT_NDK_VERSION}" >> "$GITHUB_ENV"
           echo "ANDROID_NDK=$ANDROID_HOME/ndk/${TAWCROOT_NDK_VERSION}" >> "$GITHUB_ENV"
-
-          # Gradle 若写死了别的 ndkVersion，同步改成同一版本，避免 AGP 去找不存在的目录
+          # 注：上游 build.gradle.kts:44 为 ndkVersion = flutter.ndkVersion（无引号），
+          # 下列 sed 对其 no-op；靠 flutter 与已装 NDK 一致即可，run5 已验证不致命。
           for f in app/android/app/build.gradle.kts app/android/app/build.gradle; do
             [ -f "$f" ] && sed -i -E 's/ndkVersion[[:space:]]*=[[:space:]]*"[^"]*"/ndkVersion = "'"${TAWCROOT_NDK_VERSION}"'"/' "$f" || true
           done
@@ -183,29 +162,7 @@ jobs:
           source tooling/env.sh
           bash runtime/build-runtime.sh arm64-v8a
 
-      - name: 从 Secrets 恢复发布密钥
-        if: steps.tag.outputs.exists == 'false'
-        env:
-          KEYSTORE_B64: ${{ secrets.RELEASE_KEYSTORE_B64 }}
-          STORE_PASSWORD: ${{ secrets.RELEASE_STORE_PASSWORD }}
-          KEY_ALIAS: ${{ secrets.RELEASE_KEY_ALIAS }}
-          KEY_PASSWORD: ${{ secrets.RELEASE_KEY_PASSWORD }}
-        run: |
-          set -euo pipefail
-          if [ -z "$KEYSTORE_B64" ]; then echo "缺少 RELEASE_KEYSTORE_B64"; exit 1; fi
-          mkdir -p upstream/app/android
-          umask 077
-          printf '%s' "$KEYSTORE_B64" | base64 -d > upstream/app/android/release.jks
-          cat > upstream/app/android/key.properties <<EOF
-          storeFile=../release.jks
-          storePassword=$STORE_PASSWORD
-          keyAlias=$KEY_ALIAS
-          keyPassword=$KEY_PASSWORD
-          EOF
-          chmod 600 upstream/app/android/key.properties
-          ls -l upstream/app/android/release.jks upstream/app/android/key.properties
-
-      - name: 构建并自签名 APK
+      - name: 构建 APK（无密钥，debug 签名）
         if: steps.tag.outputs.exists == 'false'
         working-directory: upstream
         env:
@@ -215,54 +172,193 @@ jobs:
           DSH_UPDATE_FEED: ${{ vars.DSH_UPDATE_FEED }}
           DSH_WORKSHOP_ORIGIN: ${{ vars.DSH_WORKSHOP_ORIGIN }}
         run: |
+          set -euo pipefail
           source tooling/env.sh
-          # env.sh 的 PATH 没有 build-tools，apksigner/aapt2 都在这里
-          if [ -d "$ANDROID_HOME/build-tools" ]; then
-            BT=$(ls -1 "$ANDROID_HOME/build-tools" | sort -V | tail -n1)
-            export PATH="$ANDROID_HOME/build-tools/$BT:$PATH"
-            echo "build-tools: $BT"
-          fi
-          # 使 update.json、page 与 gh 命令均指向本仓库
-          export DSH_RELEASE_REPO="$SELF_REPO"
+          # env.sh PATH 不含 build-tools，这里补上（apksigner/aapt2 在此）
+          BT=$(ls -1 "$ANDROID_HOME/build-tools" | sort -V | tail -n1)
+          export PATH="$ANDROID_HOME/build-tools/$BT:$PATH"
+          echo "build-tools: $BT"
+          # 不写 key.properties：build.gradle.kts:134 在无 key.properties 时回退 debug 签名。
+          # 该 APK 只作为产物传给可信区重签，绝不直接发布。
           bash tooling/build-apk.sh -f arm64 \
             -- --dart-define=DSH_UPDATE_REPO="$DSH_UPDATE_REPO" \
                --dart-define=DSH_UPDATE_MIRROR= \
                --dart-define=DSH_UPDATE_MIRRORS= \
                --dart-define=DSH_UPDATE_FEED="$DSH_UPDATE_FEED" \
                --dart-define=DSH_WORKSHOP_ORIGIN="$DSH_WORKSHOP_ORIGIN"
-          # 打印并校验签名证书信息
-          APK=app/build/app/outputs/flutter-apk/app-arm64-release.apk
-          apksigner verify --min-sdk-version 21 --print-certs "$APK"
+          echo "构建完成（debug 签名，待可信区重签）"
 
-      - name: 生成发布资产（update.json / SHA256SUMS / 可选增量补丁）
+      - name: 提取版本元数据并整理产物
         if: steps.tag.outputs.exists == 'false'
-        working-directory: upstream
-        env:
-          GH_TOKEN: ${{ github.token }}
-          DSH_RELEASE_REPO: ${{ env.SELF_REPO }}
-        run: |
-          python3 tooling/release_assets.py --delta-from 0
-
-      - name: 发布到本仓库 Release
-        if: steps.tag.outputs.exists == 'false'
-        env:
-          GH_TOKEN: ${{ github.token }}
-          TAG: ${{ steps.tag.outputs.tag }}
         run: |
           set -euo pipefail
-          # 兜底：即使 concurrency 或查重因某种原因失效，也不因 tag 已存在而让 job 变红
-          if gh release view "$TAG" --repo "$SELF_REPO" >/dev/null 2>&1; then
-            echo "Release $TAG 已存在，跳过发布"
-            exit 0
+          source upstream/tooling/env.sh
+          BT=$(ls -1 "$ANDROID_HOME/build-tools" | sort -V | tail -n1)
+          AAPT2="$ANDROID_HOME/build-tools/$BT/aapt2"
+          APK=upstream/app/build/app/outputs/flutter-apk/app-arm64-release.apk
+          test -f "$APK"
+          BADGING=$("$AAPT2" dump badging "$APK")
+          VNAME=$(printf '%s' "$BADGING" | sed -n "s/.*versionName='\([^']*\)'.*/\1/p" | head -n1)
+          VCODE=$(printf '%s' "$BADGING" | sed -n "s/.*versionCode='\([0-9]*\)'.*/\1/p" | head -n1)
+          echo "versionName=$VNAME versionCode=$VCODE"
+          test -n "$VNAME" && test -n "$VCODE"
+          python3 -c "import json,sys; json.dump({'versionName':sys.argv[1],'versionCode':int(sys.argv[2])}, open('version.json','w'))" "$VNAME" "$VCODE"
+          cp "$APK" ./app-arm64-debug.apk
+
+      - name: 上传构建产物给签名 job
+        if: steps.tag.outputs.exists == 'false'
+        uses: actions/upload-artifact@v4
+        with:
+          name: apk-to-sign
+          path: |
+            ./app-arm64-debug.apk
+            ./version.json
+          retention-days: 1
+          if-no-files-found: error
+
+  # ============================================================
+  # job2 sign-publish：可信区，只消费产物，不跑上游代码
+  # ============================================================
+  sign-publish:
+    needs: build
+    if: needs.build.outputs.exists == 'false'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: write
+    # 可选更强隔离：在仓库 Settings → Environments 建一个名为 release 的环境，
+    # 把下面 4 个 Secret 移到该环境并取消下面注释（只做 Secret 隔离，不加 reviewers，
+    # 以保持"无维护"；若加 required reviewers 则需人工审批，与零维护冲突）。
+    # environment: release
+    steps:
+      - name: 检出本仓库（只为拿自持发布脚本）
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: 下载构建产物
+        uses: actions/download-artifact@v4
+        with:
+          name: apk-to-sign
+          path: artifact
+
+      - name: 产物结构初检（非安全认证）
+        # 位置：碰密钥之前。只拦损坏包/元数据错配/异常体积这类低质量问题；
+        # 不查代码逻辑，挡不住篡改现有逻辑的高质量投毒——它是初检，不是安全认证。
+        env:
+          TAG: ${{ needs.build.outputs.tag }}
+        run: |
+          set -euo pipefail
+          APK=artifact/app-arm64-debug.apk
+          test -s "$APK"
+          # 1) 完整性：APK 本质是 zip，python 标准库全量 CRC 校验（零新增依赖）
+          python3 -c "import zipfile,sys; z=zipfile.ZipFile(sys.argv[1]); bad=z.testzip(); sys.exit('CRC 损坏: '+bad if bad else 0)" "$APK"
+          # 2) 元数据自洽：version.json 与 tag
+          python3 - <<'PY'
+          import json, os, re, sys
+          d = json.load(open('artifact/version.json'))
+          name = str(d.get('versionName', ''))
+          code = d.get('versionCode')
+          tag = os.environ.get('TAG', '')
+          if not re.match(r'^\d+\.\d+\.\d+', name):
+              sys.exit('versionName 异常: ' + name)
+          if not isinstance(code, int) or isinstance(code, bool) or code <= 0:
+              sys.exit('versionCode 异常: ' + repr(code))
+          if not tag.startswith('v'):
+              sys.exit('TAG 异常: ' + tag)
+          print('元数据自洽: %s (%s)' % (name, code))
+          PY
+          # 3) 体积区间（MiB），异常放大/缩小即拒
+          SZ=$(stat -c %s "$APK")
+          MIN=$((60*1024*1024)); MAX=$((500*1024*1024))
+          if [ "$SZ" -lt "$MIN" ] || [ "$SZ" -gt "$MAX" ]; then
+            echo "APK 体积异常: $SZ 字节（期望 60–500 MiB），拒绝发布"; exit 1
           fi
-          cd upstream
+          echo "初检通过: $SZ 字节，CRC/元数据/体积正常（注意：这不是安全认证）"
+
+      - name: 安装 apksigner
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq apksigner zip
+          apksigner version
+
+      - name: 恢复自有签名密钥
+        env:
+          KEYSTORE_B64: ${{ secrets.RELEASE_KEYSTORE_B64 }}
+        run: |
+          set -euo pipefail
+          if [ -z "$KEYSTORE_B64" ]; then echo "缺少 RELEASE_KEYSTORE_B64"; exit 1; fi
+          mkdir -p keys && umask 077
+          printf '%s' "$KEYSTORE_B64" | base64 -d > keys/release.jks
+          test -s keys/release.jks
+
+      - name: 剥离 debug 签名并用自有密钥重签
+        env:
+          STORE_PASSWORD: ${{ secrets.RELEASE_STORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.RELEASE_KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.RELEASE_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          cp artifact/app-arm64-debug.apk keys/app.apk
+          # 去掉 v1 的 JAR 签名文件；v2/v3 在 signing block，由 apksigner sign 整包替换
+          zip -d keys/app.apk 'META-INF/*.RSA' 'META-INF/*.SF' 'META-INF/*.MF' \
+                             'META-INF/*.DSA' 'META-INF/*.EC' || true
+          apksigner sign \
+            --ks keys/release.jks \
+            --ks-pass pass:"$STORE_PASSWORD" \
+            --key-pass pass:"$KEY_PASSWORD" \
+            --ks-key-alias "$KEY_ALIAS" \
+            --v1-signing-enabled true \
+            --v2-signing-enabled true \
+            --v3-signing-enabled true \
+            keys/app.apk
+          echo "重签完成"
+
+      - name: 签名门禁校验
+        run: |
+          set -euo pipefail
+          CERTS=$(apksigner verify -v --min-sdk-version 21 --print-certs keys/app.apk)
+          printf '%s\n' "$CERTS"
+          # docs/release.md:95 门禁：v1/v2/v3 都要 true，证书主题不得含 CN=Android Debug
+          for n in v1 v2 v3; do
+            if printf '%s' "$CERTS" | grep -E "Verified using ${n} scheme" | grep -q ': false'; then
+              echo "${n} 签名缺失，拒绝发布"; exit 1
+            fi
+          done
+          if printf '%s' "$CERTS" | grep -qi 'CN=Android Debug'; then
+            echo "签名仍是 Android Debug，拒绝发布"; exit 1
+          fi
+          echo "签名校验通过：v1/v2/v3 完整，且非 debug 证书"
+
+      - name: 用自持脚本生成发布资产
+        env:
+          SELF_REPO: ${{ env.SELF_REPO }}
+          TAG: ${{ needs.build.outputs.tag }}
+        run: |
+          set -euo pipefail
+          VNAME=$(python3 -c "import json;print(json.load(open('artifact/version.json'))['versionName'])")
+          VCODE=$(python3 -c "import json;print(json.load(open('artifact/version.json'))['versionCode'])")
+          python3 scripts/self_signed_release.py \
+            --apk keys/app.apk --out dist \
+            --version-name "$VNAME" --version-code "$VCODE" \
+            --notes "自动跟随上游 $UPSTREAM_REPO@$TAG，用本仓库自有密钥重签发布。"
+          ls -l dist/
+
+      - name: 发布到本仓库 Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.build.outputs.tag }}
+        run: |
+          set -euo pipefail
+          if gh release view "$TAG" --repo "$SELF_REPO" >/dev/null 2>&1; then
+            echo "Release $TAG 已存在，跳过"; exit 0
+          fi
           VERSION="${TAG#v}"
-          TITLE="DSH Go ${VERSION} (self-signed)"
           gh release create "$TAG" dist/* \
             --repo "$SELF_REPO" \
-            --title "$TITLE" \
+            --title "DSH Go $VERSION (self-signed)" \
             --notes "自动跟随上游 $UPSTREAM_REPO@$TAG，用本仓库自有密钥重签并发布。引擎版本与补丁集与上游该 tag 一致。"
 
-      - name: 清理密钥
+      - name: 清理密钥与临时产物
         if: always()
-        run: rm -f upstream/app/android/release.jks upstream/app/android/key.properties || true
+        run: rm -rf keys artifact dist app-arm64-debug.apk version.json || true
