@@ -1,16 +1,18 @@
 #!/usr/bin/env python3
 """构建前应用自主档最小改造。纯标准库，找不到预期字符串立即失败，不静默跳过。
 
-用法: python3 apply_autonomous.py <上游源码目录> <owner/repo> [--with-data-extraction]
+用法: python3 apply_autonomous.py <上游源码目录> <owner/repo> [--with-data-extraction] [--telemetry-default-off]
 
 选项:
-  --with-data-extraction  可选：补 Android 12+ 备份排除规则（默认不启用）。
+  --with-data-extraction     可选：补 Android 12+ 备份排除规则（默认不启用）。
+  --telemetry-default-off    可选：把匿名统计开关默认值改为关闭（opt-in）。
 
 依据（均为在上游 ccch1mneyyy/dsh-Go 源码逐行核实过的原文）:
   1 app/lib/update/update_config.dart   const updateRepo = 'ccch1mneyyy/dsh-go';
   2 tooling/release_assets.py           REPO = "ccch1mneyyy/dsh-go"
   3 app/android/app/src/main/AndroidManifest.xml  android:allowBackup="false"
-第 3 项默认不启用，启用前需核对目标环境对该规则的接受情况。
+  4 app/lib/usage/usage_stats.dart      this.enabled = true / prefs.getBool(enabledKey) ?? true
+第 3、4 项默认不启用。第 4 项是两处精确字符串替换，上游一改即 sys.exit 硬失败，不会静默。
 
 设计取舍：
   「换自有美术素材」不改任何 Dart 源码，只在工作流里整目录覆盖 app/assets/。
@@ -69,14 +71,17 @@ DATA_EXTRACTION_RULES = """<?xml version="1.0" encoding="utf-8"?>
 def main():
     args = sys.argv[1:]
     if len(args) < 2:
-        sys.exit("用法: apply_autonomous.py <src-dir> <owner/repo> [--with-data-extraction]")
+        sys.exit("用法: apply_autonomous.py <src-dir> <owner/repo> [--with-data-extraction] [--telemetry-default-off]")
     root = pathlib.Path(args[0])
     repo = args[1]
     opts = args[2:]
     with_dex = False
+    telemetry_off = False
     for o in opts:
         if o == "--with-data-extraction":
             with_dex = True
+        elif o == "--telemetry-default-off":
+            telemetry_off = True
         else:
             sys.exit("未知参数: {!r}".format(o))
 
@@ -98,6 +103,25 @@ def main():
         'REPO = os.environ.get("DSH_RELEASE_REPO", "{}")'.format(repo),
     )
 
+    # 2b 可选：匿名统计默认关闭（opt-in）。
+    #     上游默认 opt-out：构造默认 enabled=true，且 _load 读取时 `?? true`。
+    #     两处都要改成 false，否则：只改构造 → 老用户 prefs 无键时 _load 仍回 true；
+    #     只改 _load → 首次运行 build() 的初始状态仍是 enabled=true。
+    #     用户此前手动关过（prefs 里 enabled=false）不受影响，仍是关；
+    #     从未设置过的用户从"默认开"变成"默认关"，需主动进设置打开才开始统计。
+    #     两处均为精确字符串，上游一改即 sys.exit 硬失败，不会静默失效。
+    if telemetry_off:
+        replace(
+            root / "app/lib/usage/usage_stats.dart",
+            "const UsageStatsState({this.loaded = false, this.enabled = true, this.noticed = false});",
+            "const UsageStatsState({this.loaded = false, this.enabled = false, this.noticed = false});",
+        )
+        replace(
+            root / "app/lib/usage/usage_stats.dart",
+            "final enabled = prefs.getBool(enabledKey) ?? true;",
+            "final enabled = prefs.getBool(enabledKey) ?? false;",
+        )
+
     # 3 可选：补 dataExtractionRules（语法需核对，默认不启用）
     if with_dex:
         replace(
@@ -110,7 +134,9 @@ def main():
             DATA_EXTRACTION_RULES,
         )
 
-    print("自主档改造完成，目标仓库:", repo, "（桌宠为整目录覆盖，无源码 patch）")
+    print("自主档改造完成，目标仓库:", repo,
+          "| 桌宠为整目录覆盖，无源码 patch",
+          "| 遥测默认关:", "是" if telemetry_off else "否")
 
 
 if __name__ == "__main__":

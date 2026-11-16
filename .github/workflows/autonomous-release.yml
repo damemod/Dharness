@@ -117,7 +117,10 @@ jobs:
         if: steps.tag.outputs.exists == 'false'
         run: |
           set -euo pipefail
-          python3 self/patches/apply_autonomous.py upstream "$SELF_REPO"
+          # --telemetry-default-off: 把匿名统计从默认开(opt-out)改为默认关(opt-in)，
+          # 两处精确字符串 patch（usage_stats.dart 构造默认值 + _load ?? true），
+          # 上游一改即 sys.exit 硬失败提醒，不会静默失效；不影响前面的拉取动作。
+          python3 self/patches/apply_autonomous.py upstream "$SELF_REPO" --telemetry-default-off
 
       - name: 去三方机制哨兵（只读告警，不影响拉取）
         if: steps.tag.outputs.exists == 'false'
