@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
 """构建前应用自主档最小改造。纯标准库，找不到预期字符串立即失败，不静默跳过。
 
-用法: python3 apply_autonomous.py <上游源码目录> <owner/repo> [--with-data-extraction] [--telemetry-default-off] [--single-market-source]
+用法: python3 apply_autonomous.py <上游源码目录> <owner/repo> [--with-data-extraction] [--telemetry-default-off] [--single-market-source] [--lazy-relay-login] [--forum-default-empty]
 
 选项:
   --with-data-extraction    可选：补 Android 12+ 备份排除规则（默认不启用）。
   --telemetry-default-off   可选：把匿名统计开关默认值改为关闭（opt-in）。
   --single-market-source    可选：插件市场索引收敛为单一来源（默认多源并列）。
+  --lazy-relay-login        可选：远程登录方式改为按需获取（未在后台无差别预检）。
+  --forum-default-empty     可选：论坛地址默认留空（需要时在设置里填，仍可用）。
 
 依据（均为在上游 ccch1mneyyy/dsh-Go 源码逐行核实过的原文）:
   1 app/lib/update/update_config.dart   const updateRepo = 'ccch1mneyyy/dsh-go';
@@ -14,7 +16,9 @@
   3 app/android/app/src/main/AndroidManifest.xml  android:allowBackup="false"
   4 app/lib/usage/usage_stats.dart      this.enabled = true / prefs.getBool(enabledKey) ?? true
   5 app/lib/state/plugins/plugin_market.dart  fetchOfficialMarket() 签名行 + 首行（市场源收敛 patch）
-第 3、4、5 项默认不启用。第 4、5 项是精确字符串替换，上游一改即 sys.exit 硬失败，不会静默。
+  6 app/lib/state/hosts_state.dart     if (user == null) return base.copyWith(providers: await _loginProviders(backend));
+  7 app/lib/forum/forum_config.dart    const forumDefaultBaseUrl = 'https://forum.dshtui.com';
+第 3、4、5、6、7 项默认不启用。第 4、5、6、7 项是精确字符串替换，上游一改即 sys.exit 硬失败，不会静默。
 
 设计取舍：
   「换自有美术素材」不改任何 Dart 源码，只在工作流里整目录覆盖 app/assets/。
@@ -73,13 +77,15 @@ DATA_EXTRACTION_RULES = """<?xml version="1.0" encoding="utf-8"?>
 def main():
     args = sys.argv[1:]
     if len(args) < 2:
-        sys.exit("用法: apply_autonomous.py <src-dir> <owner/repo> [--with-data-extraction] [--telemetry-default-off] [--single-market-source]")
+        sys.exit("用法: apply_autonomous.py <src-dir> <owner/repo> [--with-data-extraction] [--telemetry-default-off] [--single-market-source] [--lazy-relay-login] [--forum-default-empty]")
     root = pathlib.Path(args[0])
     repo = args[1]
     opts = args[2:]
     with_dex = False
     telemetry_off = False
     single_market = False
+    lazy_relay = False
+    forum_empty = False
     for o in opts:
         if o == "--with-data-extraction":
             with_dex = True
@@ -87,6 +93,10 @@ def main():
             telemetry_off = True
         elif o == "--single-market-source":
             single_market = True
+        elif o == "--lazy-relay-login":
+            lazy_relay = True
+        elif o == "--forum-default-empty":
+            forum_empty = True
         else:
             sys.exit("未知参数: {!r}".format(o))
 
@@ -146,6 +156,36 @@ def main():
             "  final copy = await _readOfficialCopy();",
         )
 
+    # 2d 可选：远程登录方式改为按需获取。
+    #     上游 RelayAccountController.build() 在 build 阶段（未登录时）就调用
+    #     _loginProviders() 向服务器发出一次真实请求（GET .../auth/oauth/providers），
+    #     而 build() 会被桌宠浮层、已读列表等纯展示点 watch 到，等于第一次进 App
+    #     就无差别预检。这里改成不预取：providers 留空，登录页会回退到通用的
+    #     浏览器登录按钮（remote_screen.dart 中 account.providers.isEmpty 分支），
+    #     三个主动入口（登录卡片、自托管换地址、第三方配对切服务器）都不受影响，
+    #     它们各自走 backend.login() / useServer()，不依赖这份预取列表。
+    #     锚点是单行，上游一改即 sys.exit 硬失败，不会静默失效。
+    if lazy_relay:
+        replace(
+            root / "app/lib/state/hosts_state.dart",
+            "    if (user == null) return base.copyWith(providers: await _loginProviders(backend));",
+            "    // 自主档：登录方式按需获取，不在后台无差别预检服务器。\n"
+            "    if (user == null) return base;",
+        )
+
+    # 2e 可选：论坛地址默认留空。
+    #     上游 forumDefaultBaseUrl 是「可调窗口」：forum_state.dart 里 _load 会用
+    #     用户自定义地址覆盖它，set() 写入自定义地址；若把默认值改成空串，
+    #     未设置用户的 Uri.parse('') 发不出请求，而在论坛设置里填了自定义地址的
+    #     用户照旧可用（isCustom 仍按 != forumDefaultBaseUrl 判断，逻辑不变）。
+    #     锚点是单行，上游一改即 sys.exit 硬失败，不会静默失效。
+    if forum_empty:
+        replace(
+            root / "app/lib/forum/forum_config.dart",
+            "const forumDefaultBaseUrl = 'https://forum.dshtui.com';",
+            "const forumDefaultBaseUrl = '';",
+        )
+
     # 3 可选：补 dataExtractionRules（语法需核对，默认不启用）
     if with_dex:
         replace(
@@ -161,7 +201,9 @@ def main():
     print("自主档改造完成，目标仓库:", repo,
           "| 桌宠为整目录覆盖，无源码 patch",
           "| 遥测默认关:", "是" if telemetry_off else "否",
-          "| 市场索引单源:", "是" if single_market else "否")
+          "| 市场索引单源:", "是" if single_market else "否",
+          "| 远程登录按需:", "是" if lazy_relay else "否",
+          "| 论坛默认留空:", "是" if forum_empty else "否")
 
 
 if __name__ == "__main__":

@@ -67,6 +67,12 @@ GUARDS: list[tuple[str, str, str]] = [
     ("app/lib/state/plugins/plugin_market.dart",
      "LocalizedText.plain('插件市场')",
      "市场索引已收敛为单一来源（fetchOfficialMarket 提前返回空目录）"),
+    ("app/lib/state/hosts_state.dart",
+     "登录方式按需获取",
+     "远程登录方式为按需获取（不在后台无差别预检）"),
+    ("app/lib/forum/forum_config.dart",
+     "const forumDefaultBaseUrl = '';",
+     "论坛地址默认留空（需要时可在设置里填）"),
 ]
 
 # 已知允许出现的第三方主机（注释、文档或用户主动功能），仅作信息提示，不判失败。

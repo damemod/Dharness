@@ -121,9 +121,12 @@ jobs:
           # 两处精确字符串 patch（usage_stats.dart 构造默认值 + _load ?? true）。
           # --single-market-source: 插件市场索引收敛为单一来源（上游默认多源并列、
           # 条目口径可能重叠；单源列表更一致可复现），dshfind 源保留。
+          # --lazy-relay-login: 远程登录方式改为按需获取，不在后台无差别预检服务器；
+          # 三个主动入口（登录卡片、自托管换地址、第三方配对）均保留。
+          # --forum-default-empty: 论坛地址默认留空，需要时在设置里填，仍可用。
           # 均为精确字符串 patch，上游一改即 sys.exit 硬失败提醒，不会静默失效；
           # 这些 patch 都在拉取之后执行，不影响前面的拉取动作本身。
-          python3 self/patches/apply_autonomous.py upstream "$SELF_REPO" --telemetry-default-off --single-market-source
+          python3 self/patches/apply_autonomous.py upstream "$SELF_REPO" --telemetry-default-off --single-market-source --lazy-relay-login --forum-default-empty
 
       - name: 去三方机制哨兵（只读告警，不影响拉取）
         if: steps.tag.outputs.exists == 'false'
