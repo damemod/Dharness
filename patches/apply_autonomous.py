@@ -1,18 +1,20 @@
 #!/usr/bin/env python3
 """构建前应用自主档最小改造。纯标准库，找不到预期字符串立即失败，不静默跳过。
 
-用法: python3 apply_autonomous.py <上游源码目录> <owner/repo> [--with-data-extraction] [--telemetry-default-off]
+用法: python3 apply_autonomous.py <上游源码目录> <owner/repo> [--with-data-extraction] [--telemetry-default-off] [--single-market-source]
 
 选项:
-  --with-data-extraction     可选：补 Android 12+ 备份排除规则（默认不启用）。
-  --telemetry-default-off    可选：把匿名统计开关默认值改为关闭（opt-in）。
+  --with-data-extraction    可选：补 Android 12+ 备份排除规则（默认不启用）。
+  --telemetry-default-off   可选：把匿名统计开关默认值改为关闭（opt-in）。
+  --single-market-source    可选：插件市场索引收敛为单一来源（默认多源并列）。
 
 依据（均为在上游 ccch1mneyyy/dsh-Go 源码逐行核实过的原文）:
   1 app/lib/update/update_config.dart   const updateRepo = 'ccch1mneyyy/dsh-go';
   2 tooling/release_assets.py           REPO = "ccch1mneyyy/dsh-go"
   3 app/android/app/src/main/AndroidManifest.xml  android:allowBackup="false"
   4 app/lib/usage/usage_stats.dart      this.enabled = true / prefs.getBool(enabledKey) ?? true
-第 3、4 项默认不启用。第 4 项是两处精确字符串替换，上游一改即 sys.exit 硬失败，不会静默。
+  5 app/lib/state/plugins/plugin_market.dart  fetchOfficialMarket() 签名行 + 首行（市场源收敛 patch）
+第 3、4、5 项默认不启用。第 4、5 项是精确字符串替换，上游一改即 sys.exit 硬失败，不会静默。
 
 设计取舍：
   「换自有美术素材」不改任何 Dart 源码，只在工作流里整目录覆盖 app/assets/。
@@ -71,17 +73,20 @@ DATA_EXTRACTION_RULES = """<?xml version="1.0" encoding="utf-8"?>
 def main():
     args = sys.argv[1:]
     if len(args) < 2:
-        sys.exit("用法: apply_autonomous.py <src-dir> <owner/repo> [--with-data-extraction] [--telemetry-default-off]")
+        sys.exit("用法: apply_autonomous.py <src-dir> <owner/repo> [--with-data-extraction] [--telemetry-default-off] [--single-market-source]")
     root = pathlib.Path(args[0])
     repo = args[1]
     opts = args[2:]
     with_dex = False
     telemetry_off = False
+    single_market = False
     for o in opts:
         if o == "--with-data-extraction":
             with_dex = True
         elif o == "--telemetry-default-off":
             telemetry_off = True
+        elif o == "--single-market-source":
+            single_market = True
         else:
             sys.exit("未知参数: {!r}".format(o))
 
@@ -122,6 +127,25 @@ def main():
             "final enabled = prefs.getBool(enabledKey) ?? false;",
         )
 
+    # 2c 可选：插件市场索引收敛为单一来源。
+    #     上游默认把内建索引与社区索引两路并列合并，条目口径可能重叠；本档位
+    #     统一使用社区维护的单一索引源，列表更一致、可复现。
+    #     做法：在 fetchOfficialMarket() 首行插入提前 return，返回零条目的空目录；
+    #     marketAllProvider 里的 MarketCatalog.merged(all, official) 把空目录合进来，
+    #     结果即为单一来源列表。常量、其它 provider 与所有测试引用都不动，
+    #     调用方无需改动。锚点是函数签名 + 首行，上游一改即 sys.exit 硬失败。
+    if single_market:
+        replace(
+            root / "app/lib/state/plugins/plugin_market.dart",
+            "Future<MarketCatalog> fetchOfficialMarket({MarketFileFetcher get = fetchMarketFile, bool refresh = false}) async {\n"
+            "  final copy = await _readOfficialCopy();",
+            "Future<MarketCatalog> fetchOfficialMarket({MarketFileFetcher get = fetchMarketFile, bool refresh = false}) async {\n"
+            "  // 自主档：插件市场索引收敛为单一来源，内建索引返回空目录，\n"
+            "  // 合并后即为社区维护的单一列表；其它来源与调用方不受影响。\n"
+            "  return MarketCatalog(MarketIndex(url: Uri.parse(officialIndexUrl), title: LocalizedText.plain('插件市场')));\n"
+            "  final copy = await _readOfficialCopy();",
+        )
+
     # 3 可选：补 dataExtractionRules（语法需核对，默认不启用）
     if with_dex:
         replace(
@@ -136,7 +160,8 @@ def main():
 
     print("自主档改造完成，目标仓库:", repo,
           "| 桌宠为整目录覆盖，无源码 patch",
-          "| 遥测默认关:", "是" if telemetry_off else "否")
+          "| 遥测默认关:", "是" if telemetry_off else "否",
+          "| 市场索引单源:", "是" if single_market else "否")
 
 
 if __name__ == "__main__":

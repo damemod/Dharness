@@ -5,8 +5,9 @@
 ------------
 自主档去掉第三方链接靠两类机制：
 
-  (1) apply_autonomous.py 的两处精确字符串 patch
-      （update_config.dart 的 updateRepo、release_assets.py 的 REPO）。
+  (1) apply_autonomous.py 的精确字符串 patch
+      （update_config.dart 的 updateRepo、release_assets.py 的 REPO，
+      以及市场索引单源模式下的 plugin_market.dart 提前返回）。
       这类失效时 replace() 计数不符会 sys.exit —— 是「响亮的硬失败」，
       本来就会中断构建提醒你，过去无需额外检测。
 
@@ -59,10 +60,13 @@ GUARDS: list[tuple[str, str, str]] = [
     ("app/lib/update/update_config.dart",
      "final public = accelerators == null",
      "空加速器列表语义仍在（传空串不再回落公共镜像）"),
-    # 纵深防御：确认 apply_autonomous.py 的 updateRepo patch 确实生效
+    # 纵深防御：确认 apply_autonomous.py 的源码 patch 确实生效
     ("app/lib/update/update_config.dart",
      "String.fromEnvironment('DSH_UPDATE_REPO'",
      "updateRepo 已被改成编译期可注入（否则 dart-define 被忽略）"),
+    ("app/lib/state/plugins/plugin_market.dart",
+     "LocalizedText.plain('插件市场')",
+     "市场索引已收敛为单一来源（fetchOfficialMarket 提前返回空目录）"),
 ]
 
 # 已知允许出现的第三方主机（注释、文档或用户主动功能），仅作信息提示，不判失败。
