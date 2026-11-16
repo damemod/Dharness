@@ -7,7 +7,7 @@
   --with-data-extraction    可选：补 Android 12+ 备份排除规则（默认不启用）。
   --telemetry-default-off   可选：把匿名统计开关默认值改为关闭（opt-in）。
   --single-market-source    可选：插件市场索引收敛为单一来源（默认多源并列）。
-  --lazy-relay-login        可选：远程登录方式改为按需获取（未在后台无差别预检）。
+  --lazy-relay-login        可选：远程登录方式改为按需获取。
   --forum-default-empty     可选：论坛地址默认留空（需要时在设置里填，仍可用）。
 
 依据（均为在上游 ccch1mneyyy/dsh-Go 源码逐行核实过的原文）:
@@ -123,7 +123,7 @@ def main():
     #     两处都要改成 false，否则：只改构造 → 老用户 prefs 无键时 _load 仍回 true；
     #     只改 _load → 首次运行 build() 的初始状态仍是 enabled=true。
     #     用户此前手动关过（prefs 里 enabled=false）不受影响，仍是关；
-    #     从未设置过的用户从"默认开"变成"默认关"，需主动进设置打开才开始统计。
+    #     从未设置过的用户从默认开变成默认关，需主动进设置打开才开始统计。
     #     两处均为精确字符串，上游一改即 sys.exit 硬失败，不会静默失效。
     if telemetry_off:
         replace(
@@ -137,47 +137,37 @@ def main():
             "final enabled = prefs.getBool(enabledKey) ?? false;",
         )
 
-    # 2c 可选：插件市场索引收敛为单一来源。
-    #     上游默认把内建索引与社区索引两路并列合并，条目口径可能重叠；本档位
-    #     统一使用社区维护的单一索引源，列表更一致、可复现。
-    #     做法：在 fetchOfficialMarket() 首行插入提前 return，返回零条目的空目录；
-    #     marketAllProvider 里的 MarketCatalog.merged(all, official) 把空目录合进来，
-    #     结果即为单一来源列表。常量、其它 provider 与所有测试引用都不动，
-    #     调用方无需改动。锚点是函数签名 + 首行，上游一改即 sys.exit 硬失败。
+    # 2c 可选：插件市场索引统一为单一来源。
+    #     上游默认并列多个索引，条目口径可能重叠；统一后列表更一致可复现。
+    #     做法：在 fetchOfficialMarket() 首行插入提前 return 空目录；合并后即为
+    #     单一来源列表。常量、其它 provider 与调用方都不动。锚点是函数签名 + 首行。
     if single_market:
         replace(
             root / "app/lib/state/plugins/plugin_market.dart",
             "Future<MarketCatalog> fetchOfficialMarket({MarketFileFetcher get = fetchMarketFile, bool refresh = false}) async {\n"
             "  final copy = await _readOfficialCopy();",
             "Future<MarketCatalog> fetchOfficialMarket({MarketFileFetcher get = fetchMarketFile, bool refresh = false}) async {\n"
-            "  // 自主档：插件市场索引收敛为单一来源，内建索引返回空目录，\n"
-            "  // 合并后即为社区维护的单一列表；其它来源与调用方不受影响。\n"
+            "  // 统一使用单一索引源。\n"
             "  return MarketCatalog(MarketIndex(url: Uri.parse(officialIndexUrl), title: LocalizedText.plain('插件市场')));\n"
             "  final copy = await _readOfficialCopy();",
         )
 
-    # 2d 可选：远程登录方式改为按需获取。
-    #     上游 RelayAccountController.build() 在 build 阶段（未登录时）就调用
-    #     _loginProviders() 向服务器发出一次真实请求（GET .../auth/oauth/providers），
-    #     而 build() 会被桌宠浮层、已读列表等纯展示点 watch 到，等于第一次进 App
-    #     就无差别预检。这里改成不预取：providers 留空，登录页会回退到通用的
-    #     浏览器登录按钮（remote_screen.dart 中 account.providers.isEmpty 分支），
-    #     三个主动入口（登录卡片、自托管换地址、第三方配对切服务器）都不受影响，
-    #     它们各自走 backend.login() / useServer()，不依赖这份预取列表。
-    #     锚点是单行，上游一改即 sys.exit 硬失败，不会静默失效。
+    # 2d 可选：远程登录方式改为按需获取（进入登录页时才取）。
+    #     做法：RelayAccountController.build() 不再预取 providers，留空后登录页
+    #     走通用登录按钮分支；各主动入口不依赖这份预取。锚点为单行，
+    #     上游一改即 sys.exit 硬失败。
     if lazy_relay:
         replace(
             root / "app/lib/state/hosts_state.dart",
             "    if (user == null) return base.copyWith(providers: await _loginProviders(backend));",
-            "    // 自主档：登录方式按需获取，不在后台无差别预检服务器。\n"
+            "    // 登录方式按需获取。\n"
             "    if (user == null) return base;",
         )
 
     # 2e 可选：论坛地址默认留空。
-    #     上游 forumDefaultBaseUrl 是「可调窗口」：forum_state.dart 里 _load 会用
-    #     用户自定义地址覆盖它，set() 写入自定义地址；若把默认值改成空串，
-    #     未设置用户的 Uri.parse('') 发不出请求，而在论坛设置里填了自定义地址的
-    #     用户照旧可用（isCustom 仍按 != forumDefaultBaseUrl 判断，逻辑不变）。
+    #     上游 forumDefaultBaseUrl 是可调窗口：forum_state.dart 里 _load 会用
+    #     用户自定义地址覆盖它，set() 写入自定义地址；默认值改成空串后，未设置的
+    #     用户发不出请求，而在设置里填了自定义地址的用户照旧可用（逻辑不变）。
     #     锚点是单行，上游一改即 sys.exit 硬失败，不会静默失效。
     if forum_empty:
         replace(
