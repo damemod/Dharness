@@ -119,6 +119,23 @@ jobs:
           set -euo pipefail
           python3 self/patches/apply_autonomous.py upstream "$SELF_REPO"
 
+      - name: 去三方机制哨兵（只读告警，不影响拉取）
+        if: steps.tag.outputs.exists == 'false'
+        run: |
+          set -uo pipefail
+          # 只读扫描 checkout 后的上游源码，检测 dart-define 名/空串语义是否仍有效。
+          # 这些是 apply_autonomous.py 精确字符串 patch 覆盖不到的「无声失效」点。
+          # 本步骤在拉取之后运行，且默认告警模式（exit 0）：
+          # 即使哨兵判定失效，也照常构建发布，仅在日志与 Actions 摘要里醒目提示，
+          # 不阻断「拉取上游」动作，也不中断自动发版。需要硬失败时可在本地对
+          # 同一脚本加 --strict 单独跑。
+          OUT=$(python3 self/scripts/check_thirdparty_guards.py upstream 2>&1 || true)
+          echo "$OUT"
+          if echo "$OUT" | grep -q "未通过"; then
+            echo "::warning::去三方链接哨兵发现潜在失效（define 名或空串语义变化），请查看本步骤日志；本次发布未受影响。"
+          fi
+          exit 0
+
       - name: 缓存工具链
         if: steps.tag.outputs.exists == 'false'
         uses: actions/cache@v4
