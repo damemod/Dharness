@@ -14,6 +14,14 @@ on:
   repository_dispatch:
     types: [upstream-release]
 
+# 定时、手动、repository_dispatch 可能同时触发同一个 tag。
+# concurrency 不支持引用 steps 输出，无法按运行时解析的 tag 动态分组；
+# 用固定 group + cancel-in-progress: false 让所有触发全局串行：
+# 第一个运行创建 Release 后，后续运行在查重步骤看到 tag 已存在即跳过。
+concurrency:
+  group: autonomous-release
+  cancel-in-progress: false
+
 permissions:
   contents: write
 
@@ -22,6 +30,8 @@ env:
   SELF_REPO: ${{ github.repository }}
   FLUTTER_VERSION: "3.47.7"
   NODE_VERSION: "24.22.1"
+  # tawcroot 硬性要求的 NDK 版本，与 runtime/tawcroot/source.json 中的 ndkVersion 一致
+  TAWCROOT_NDK_VERSION: "28.2.13676358"
 
 jobs:
   build-and-release:
@@ -114,62 +124,72 @@ jobs:
           # 素材为纯文件覆盖，更新端点由后续 dart-define 统一指向本仓库。
           python3 self/patches/apply_autonomous.py upstream "$SELF_REPO"
 
-      - name: 安装工具链（由上游脚本负责）
+      # ===== 缓存工具链：Flutter / JDK / Android SDK / 下载缓存 =====
+      # key 里带 setup-toolchain.sh 与 tawcroot source.json 的 hash：
+      # 上游改安装逻辑或 NDK 版本，缓存自动失效重建；没改则命中，setup 幂等跳过。
+      - name: 缓存工具链（Android SDK / Flutter / JDK）
+        id: toolchain-cache
+        if: steps.tag.outputs.exists == 'false'
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/dev/android-sdk
+            ~/dev/flutter
+            ~/dev/jdk-17
+            ~/dev/.downloads
+          key: toolchain-v1-${{ runner.os }}-flutter${{ env.FLUTTER_VERSION }}-${{ hashFiles('upstream/tooling/setup-toolchain.sh', 'upstream/runtime/tawcroot/source.json') }}
+          restore-keys: |
+            toolchain-v1-${{ runner.os }}-flutter${{ env.FLUTTER_VERSION }}-
+
+      # ===== 安装工具链：NDK 固定、禁用 emulator + system-image =====
+      # 1) sed 把 NDK_VERSION= 改成 tawcroot 要求的 28.2.13676358，只装一份；
+      # 2) sed 删掉 sdkmanager 参数里的 "emulator" "$SYSTEM_IMAGE"，省约 1.5 GB 下载；
+      # 3) 安装完把 ANDROID_NDK_HOME 等写进 GITHUB_ENV，后续 build.py 第一优先级命中。
+      # 只改 runner 上的临时副本，不提交回上游。
+      - name: 安装工具链（NDK 固定、禁用 emulator/system-image）
         if: steps.tag.outputs.exists == 'false'
         working-directory: upstream
         run: |
+          set -euo pipefail
+          # 1) 固定 NDK 版本
+          sed -i -E "s|^NDK_VERSION=.*$|NDK_VERSION=\"${TAWCROOT_NDK_VERSION}\"|" tooling/setup-toolchain.sh
+          # 2) 禁用 emulator + system-image（release 构建不需要）
+          sed -i 's/"emulator" "$SYSTEM_IMAGE"//g' tooling/setup-toolchain.sh
+          sed -i 's/"emulator"//g' tooling/setup-toolchain.sh
+          echo "== setup-toolchain.sh 关键行 =="
+          grep -nE '^NDK_VERSION=|sdkmanager --sdk_root' -A2 tooling/setup-toolchain.sh || true
+
           bash tooling/setup-toolchain.sh
           source tooling/env.sh
           flutter --version
           java -version
 
-      # ===== 新增：安装并固定 NDK 28.2.13676358 =====
-      - name: 安装并固定 NDK 28.2.13676358
-        if: steps.tag.outputs.exists == 'false'
-        working-directory: upstream
-        run: |
-          set -e
-          source tooling/env.sh
-          NDK_VERSION="28.2.13676358"
-          SDK_ROOT="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-}}"
-          if [ -z "$SDK_ROOT" ]; then
-            SDKMANAGER="$(command -v sdkmanager || true)"
-            if [ -n "$SDKMANAGER" ]; then
-              SDK_ROOT="$(cd "$(dirname "$SDKMANAGER")/../../.." && pwd)"
-            fi
-          fi
-          SDKMANAGER="$SDK_ROOT/cmdline-tools/latest/bin/sdkmanager"
-          if [ ! -x "$SDKMANAGER" ]; then
-            SDKMANAGER="$(command -v sdkmanager || true)"
-          fi
-          test -n "$SDK_ROOT"
-          test -x "$SDKMANAGER"
-          yes | "$SDKMANAGER" --licenses >/dev/null 2>&1 || true
-          yes | "$SDKMANAGER" --sdk_root="$SDK_ROOT" --install "ndk;$NDK_VERSION" >/dev/null
-          NDK_DIR="$SDK_ROOT/ndk/$NDK_VERSION"
-          test -d "$NDK_DIR"
-          echo "ANDROID_NDK_HOME=$NDK_DIR" >> "$GITHUB_ENV"
-          echo "ANDROID_NDK_ROOT=$NDK_DIR" >> "$GITHUB_ENV"
-          echo "ANDROID_NDK=$NDK_DIR" >> "$GITHUB_ENV"
+          echo "== 已安装的 NDK =="
+          ls -1 "$ANDROID_HOME/ndk/" 2>/dev/null || true
+          test -d "$ANDROID_HOME/ndk/${TAWCROOT_NDK_VERSION}"
+          echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/${TAWCROOT_NDK_VERSION}" >> "$GITHUB_ENV"
+          echo "ANDROID_NDK_ROOT=$ANDROID_HOME/ndk/${TAWCROOT_NDK_VERSION}" >> "$GITHUB_ENV"
+          echo "ANDROID_NDK=$ANDROID_HOME/ndk/${TAWCROOT_NDK_VERSION}" >> "$GITHUB_ENV"
+
+          # Gradle 若写死了别的 ndkVersion，同步改成同一版本，避免 AGP 去找不存在的目录
           for f in app/android/app/build.gradle.kts app/android/app/build.gradle; do
-            [ -f "$f" ] && sed -i -E 's/ndkVersion[[:space:]]*=[[:space:]]*"[^"]*"/ndkVersion = "'"$NDK_VERSION"'"/' "$f" || true
+            [ -f "$f" ] && sed -i -E 's/ndkVersion[[:space:]]*=[[:space:]]*"[^"]*"/ndkVersion = "'"${TAWCROOT_NDK_VERSION}"'"/' "$f" || true
           done
-      # ===== 新增结束 =====
 
       - name: 生成运行时 rootfs
         if: steps.tag.outputs.exists == 'false'
         working-directory: upstream
         run: |
           source tooling/env.sh
-          export ANDROID_NDK_HOME="$ANDROID_HOME/ndk/28.2.13676358"
-          export ANDROID_NDK_ROOT="$ANDROID_NDK_HOME"
-          export ANDROID_NDK="$ANDROID_NDK_HOME"
           bash runtime/build-runtime.sh arm64-v8a
 
       - name: 从 Secrets 恢复发布密钥
         if: steps.tag.outputs.exists == 'false'
         env:
           KEYSTORE_B64: ${{ secrets.RELEASE_KEYSTORE_B64 }}
+          STORE_PASSWORD: ${{ secrets.RELEASE_STORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.RELEASE_KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.RELEASE_KEY_PASSWORD }}
         run: |
           set -euo pipefail
           if [ -z "$KEYSTORE_B64" ]; then echo "缺少 RELEASE_KEYSTORE_B64"; exit 1; fi
@@ -178,11 +198,12 @@ jobs:
           printf '%s' "$KEYSTORE_B64" | base64 -d > upstream/app/android/release.jks
           cat > upstream/app/android/key.properties <<EOF
           storeFile=../release.jks
-          storePassword=${{ secrets.RELEASE_STORE_PASSWORD }}
-          keyAlias=${{ secrets.RELEASE_KEY_ALIAS }}
-          keyPassword=${{ secrets.RELEASE_KEY_PASSWORD }}
+          storePassword=$STORE_PASSWORD
+          keyAlias=$KEY_ALIAS
+          keyPassword=$KEY_PASSWORD
           EOF
           chmod 600 upstream/app/android/key.properties
+          ls -l upstream/app/android/release.jks upstream/app/android/key.properties
 
       - name: 构建并自签名 APK
         if: steps.tag.outputs.exists == 'false'
@@ -195,9 +216,6 @@ jobs:
           DSH_WORKSHOP_ORIGIN: ${{ vars.DSH_WORKSHOP_ORIGIN }}
         run: |
           source tooling/env.sh
-          export ANDROID_NDK_HOME="$ANDROID_HOME/ndk/28.2.13676358"
-          export ANDROID_NDK_ROOT="$ANDROID_NDK_HOME"
-          export ANDROID_NDK="$ANDROID_NDK_HOME"
           # 使 update.json、page 与 gh 命令均指向本仓库
           export DSH_RELEASE_REPO="$SELF_REPO"
           bash tooling/build-apk.sh -f arm64 \
@@ -226,6 +244,11 @@ jobs:
           TAG: ${{ steps.tag.outputs.tag }}
         run: |
           set -euo pipefail
+          # 兜底：即使 concurrency 或查重因某种原因失效，也不因 tag 已存在而让 job 变红
+          if gh release view "$TAG" --repo "$SELF_REPO" >/dev/null 2>&1; then
+            echo "Release $TAG 已存在，跳过发布"
+            exit 0
+          fi
           cd upstream
           VERSION="${TAG#v}"
           TITLE="DSH Go ${VERSION} (self-signed)"
