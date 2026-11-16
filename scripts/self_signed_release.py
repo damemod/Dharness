@@ -95,7 +95,7 @@ def main() -> None:
     if not repo or "/" not in repo:
         sys.exit("必须设置 SELF_REPO=<owner>/<repo>")
     if not tag or not tag.startswith("v"):
-        sys.exit("必须设置 TAG=vX.Y.Z（dsh-Go 版本 tag）")
+        sys.exit("必须设置 TAG=vX.Y.Z（上游版本 tag）")
 
     apk = pathlib.Path(args.apk).resolve()
     if not apk.is_file():
@@ -132,7 +132,7 @@ def main() -> None:
         "schema": 1,
         "version": f"{name}+{build}",
         "tag": tag,
-        "title": f"DSH Go {name}",
+        "title": f"Dharness {name}",
         "publishedAt": datetime.datetime.now(datetime.timezone.utc)
                         .replace(microsecond=0).isoformat().replace("+00:00", "Z"),
         "notes": args.notes.strip(),
