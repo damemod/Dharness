@@ -9,9 +9,12 @@
 成功、不会报错。本检查器专门盯这一类配置漂移。
 
 检查对象分三类：
-  (1) GUARDS    —— 必须存在的子串（define 名与关键语义、补丁插入的标记）；
+  (1) GUARDS    —— 必须存在的子串（define 名与关键语义、补丁后的实现逻辑）；
   (2) COUNTS    —— 必须恰好出现 N 次的子串（多处补丁要确认每一处都在）；
-  (3) FORBIDDEN —— 必须已消失的子串（缓存复活等被替换掉的旧分支）。
+  (3) FORBIDDEN —— 必须已消失的子串（被替换掉的旧实现逻辑）。
+
+每个补丁点尽量同时锚定"新逻辑在"与"旧逻辑不在"两侧，避免只查注释或单个
+字面量造成的单点检测：注释可以留在而逻辑被改回，字面量也可能凑巧命中。
 其中 dart-define 名与空串语义的失效是静默的，需要本检查器显式发现；
 精确字符串补丁失效时 replace() 计数不符本来就会中断构建，这里只做复核。
 
@@ -31,8 +34,8 @@ from __future__ import annotations
 import pathlib
 import sys
 
-# (相对路径, 必须存在的子串, 说明)。只锚定 define 名与关键语义，
-# 不锚定默认值字面量（默认值会变，define 名才是契约）。
+# (相对路径, 必须存在的子串, 说明)。锚定 define 名与补丁后的实现逻辑，
+# 不锚定默认值字面量（默认值会变，define 名与逻辑才是契约），也不锚定注释。
 GUARDS: list[tuple[str, str, str]] = [
     ("app/lib/update/update_config.dart",
      "String.fromEnvironment('DSH_UPDATE_MIRROR'",
@@ -71,15 +74,15 @@ GUARDS: list[tuple[str, str, str]] = [
      "const officialMarketBases = <String>[];",
      "市场索引基址补丁仍在"),
     ("app/lib/state/hosts_state.dart",
-     "登录方式按需获取",
-     "远程登录补丁仍在"),
+     "if (user == null) return base;",
+     "登录方式改为按需获取（后台预取已移除）"),
     ("app/lib/state/hosts_state.dart",
      "final providers = const <RelayAuthProvider>[];",
      "登出后不再主动获取登录方式"),
     ("app/lib/forum/forum_config.dart",
      "const forumDefaultBaseUrl = '';",
      "论坛默认地址补丁仍在"),
-    # 以下为"上游安全默认值"哨兵：这些文件我们未打补丁，仅监控默认值是否被改松。
+    # 以下为上游安全默认值哨兵：这些文件未打补丁，仅监控默认值是否被改松。
     ("app/android/app/src/main/kotlin/io/github/ccch1mneyyy/dsh_app/phone/SafetyGate.kt",
      "val confirmMode: ConfirmMode = ConfirmMode.ASK",
      "高危操作默认每次询问（ask）"),
@@ -94,7 +97,7 @@ GUARDS: list[tuple[str, str, str]] = [
      "Dart 侧确认模式默认 ask"),
 ]
 
-# (相对路径, 子串, 期望次数, 说明)。用于确认多处补丁每一处都在。
+# (相对路径, 子串, 期望次数, 说明)。确认多处补丁每一处都在。
 COUNTS: list[tuple[str, str, int, str]] = [
     ("app/lib/state/plugins/plugin_market.dart",
      "title: LocalizedText.plain('插件市场')",
@@ -102,12 +105,27 @@ COUNTS: list[tuple[str, str, int, str]] = [
      "市场三处（异常出口+两处缓存分支）均返回中性空目录"),
 ]
 
-# (相对路径, 禁止子串, 说明)。补丁后这些旧分支必须已消失，
-# 否则存量设备的本机缓存会绕过单源配置（静默失效）。
+# (相对路径, 禁止子串, 说明)。补丁后这些旧逻辑必须已消失：只查新逻辑
+# 可能被留存的注释或凑巧的字面量蒙混，配合 GUARDS 构成双侧锚定。
 FORBIDDEN: list[tuple[str, str, str]] = [
     ("app/lib/state/plugins/plugin_market.dart",
      "return _officialCatalog(copy.index",
      "市场旧缓存复活分支已全部堵住"),
+    ("app/lib/state/plugins/plugin_market.dart",
+     "officialIndexUrl = 'https://",
+     "市场索引地址旧值未残留"),
+    ("app/lib/state/hosts_state.dart",
+     "return base.copyWith(providers: await _loginProviders(backend))",
+     "后台预取登录方式的旧逻辑已移除"),
+    ("app/lib/state/hosts_state.dart",
+     "final providers = await _loginProviders(backend);",
+     "登出后主动获取登录方式的旧逻辑已移除"),
+    ("app/lib/usage/usage_stats.dart",
+     "prefs.getBool(enabledKey) ?? true",
+     "遥测读取默认值旧逻辑未残留"),
+    ("app/lib/forum/forum_config.dart",
+     "forumDefaultBaseUrl = 'https://",
+     "论坛默认地址旧值未残留"),
 ]
 
 

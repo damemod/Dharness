@@ -33,9 +33,12 @@ concurrency:
 env:
   UPSTREAM_REPO: ccch1mneyyy/dsh-Go
   SELF_REPO: ${{ github.repository }}
-  FLUTTER_VERSION: "3.47.7"
-  NODE_VERSION: "24.22.1"
-  TAWCROOT_NDK_VERSION: "28.2.13676358"   # 与 runtime/tawcroot/source.json:8 一致
+  # 工具链版本一律不在本文件写死，全部跟随上游脚本的 ${VAR:-default} 默认值：
+  #   - Flutter：setup-toolchain.sh:9 默认 3.47.7，与 :10 的 FLUTTER_SHA256 配套；
+  #   - Node：build-runtime.sh:45 默认 24.22.1，与 :73-79 的 sha256 pin 配套；
+  #   - NDK：tawcroot/source.json:8，由安装步骤读取，build.py:106 校验 Pkg.Revision。
+  # 若在这里锁常量，上游升级版本默认值时会连同 sha256 pin 一起改，锁定值将与 pin
+  # 失配而在校验处硬失败；跟随上游默认则版本与 pin 始终成套。
 
 jobs:
   # ============================================================
@@ -141,16 +144,23 @@ jobs:
             ~/dev/flutter
             ~/dev/jdk-17
             ~/dev/.downloads
-          key: toolchain-v1-${{ runner.os }}-flutter${{ env.FLUTTER_VERSION }}-${{ hashFiles('upstream/tooling/setup-toolchain.sh', 'upstream/runtime/tawcroot/source.json') }}
+          # setup-toolchain.sh 内含 FLUTTER_VERSION 默认值与 sha256 pin，
+          # source.json 内含 NDK 版本，二者一并 hash 即可反映工具链版本变化。
+          key: toolchain-v1-${{ runner.os }}-${{ hashFiles('upstream/tooling/setup-toolchain.sh', 'upstream/runtime/build-runtime.sh', 'upstream/runtime/tawcroot/source.json') }}
           restore-keys: |
-            toolchain-v1-${{ runner.os }}-flutter${{ env.FLUTTER_VERSION }}-
+            toolchain-v1-${{ runner.os }}-
 
-      - name: 安装工具链（NDK 固定、禁用 emulator/system-image）
+      - name: 安装工具链（NDK 随上游、禁用 emulator/system-image）
         if: steps.tag.outputs.exists == 'false'
         working-directory: upstream
         run: |
           set -euo pipefail
-          sed -i -E "s|^NDK_VERSION=.*$|NDK_VERSION=\"${TAWCROOT_NDK_VERSION}\"|" tooling/setup-toolchain.sh
+          # 从上游 source.json 读取 NDK 版本，随上游升级自动跟进。
+          # build.py:106-107 会拿它校验 NDK 的 Pkg.Revision，必须与 source.json 一致，
+          # 所以这里以该文件为唯一真源，不再用固定常量。
+          NDK_VER=$(python3 -c "import json; print(json.load(open('runtime/tawcroot/source.json'))['ndkVersion'])")
+          echo "NDK 版本（来自 source.json）: $NDK_VER"
+          sed -i -E "s|^NDK_VERSION=.*$|NDK_VERSION=\"${NDK_VER}\"|" tooling/setup-toolchain.sh
           sed -i 's/"emulator" "$SYSTEM_IMAGE"//g' tooling/setup-toolchain.sh
           sed -i 's/"emulator"//g' tooling/setup-toolchain.sh
           bash tooling/setup-toolchain.sh
@@ -158,15 +168,16 @@ jobs:
           flutter --version
           java -version
           ls -1 "$ANDROID_HOME/ndk/" 2>/dev/null || true
-          test -d "$ANDROID_HOME/ndk/${TAWCROOT_NDK_VERSION}"
-          echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/${TAWCROOT_NDK_VERSION}" >> "$GITHUB_ENV"
-          echo "ANDROID_NDK_ROOT=$ANDROID_HOME/ndk/${TAWCROOT_NDK_VERSION}" >> "$GITHUB_ENV"
-          echo "ANDROID_NDK=$ANDROID_HOME/ndk/${TAWCROOT_NDK_VERSION}" >> "$GITHUB_ENV"
-          # 注：上游 build.gradle.kts:44 为 ndkVersion = flutter.ndkVersion（无引号），
-          # 下列 sed 对其 no-op；靠 flutter 与已装 NDK 一致即可，run5 已验证不致命。
-          for f in app/android/app/build.gradle.kts app/android/app/build.gradle; do
-            [ -f "$f" ] && sed -i -E 's/ndkVersion[[:space:]]*=[[:space:]]*"[^"]*"/ndkVersion = "'"${TAWCROOT_NDK_VERSION}"'"/' "$f" || true
-          done
+          test -d "$ANDROID_HOME/ndk/${NDK_VER}"
+          echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/${NDK_VER}" >> "$GITHUB_ENV"
+          echo "ANDROID_NDK_ROOT=$ANDROID_HOME/ndk/${NDK_VER}" >> "$GITHUB_ENV"
+          echo "ANDROID_NDK=$ANDROID_HOME/ndk/${NDK_VER}" >> "$GITHUB_ENV"
+          # 让 Gradle 用的 NDK 与 tawcroot 校验用的 NDK 是同一个，避免版本漂移时
+          # Gradle 另下一份 NDK（两个 NDK）。上游 build.gradle.kts:44 是
+          # ndkVersion = flutter.ndkVersion（无引号），这里把它固定为 source.json 版本。
+          sed -i -E 's/^([[:space:]]*)ndkVersion[[:space:]]*=[[:space:]]*flutter\.ndkVersion[[:space:]]*$/\1ndkVersion = "'"${NDK_VER}"'"/' app/android/app/build.gradle.kts
+          grep -q "ndkVersion = \"${NDK_VER}\"" app/android/app/build.gradle.kts || {
+            echo "Gradle ndkVersion 未固定到 ${NDK_VER}，终止以免多份 NDK"; exit 1; }
 
       - name: 生成运行时 rootfs
         if: steps.tag.outputs.exists == 'false'
