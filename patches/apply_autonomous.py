@@ -9,6 +9,7 @@
   --single-market-source    可选：插件市场索引收敛为单一来源（默认多源并列）。
   --lazy-relay-login        可选：远程登录方式改为按需获取。
   --forum-default-empty     可选：论坛地址默认留空（需要时在设置里填，仍可用）。
+  --recall-turn-id          可选：插件菜单 scope 补回合号，供消息尾注定位。
   --dry-run                 可选：只校验所有锚点，不写入任何文件。
 
 锚点分两类，由 old 字符串的前缀区分：
@@ -91,7 +92,7 @@ DATA_EXTRACTION_RULES = """<?xml version="1.0" encoding="utf-8"?>
 """
 
 
-def build_plan(root, repo, with_dex, telemetry_off, single_market, lazy_relay, forum_empty):
+def build_plan(root, repo, with_dex, telemetry_off, single_market, lazy_relay, forum_empty, recall_turn_id):
     """返回补丁计划 [(rel, old, new)] 与新建文件计划 [(rel, content)]。"""
     plan = []
     newfiles = []
@@ -177,6 +178,18 @@ def build_plan(root, repo, with_dex, telemetry_off, single_market, lazy_relay, f
             "const forumDefaultBaseUrl = '';",
         ))
 
+    if recall_turn_id:
+        # 插件菜单 scope 补 turnId：从 AssistantChatItem.rowKey (m<turn>.<step>) 解析回合号，
+        # 让撤回尾注能贴到对应回复。精确串在文件内唯一，计数不符即失败。
+        plan.append((
+            "app/lib/ui/plugins/native/message_plugin_menu.dart",
+            "  final target = DshGoScope(sessionId: sessionId, messageId: messageId);",
+            "  final turnId = item.rowKey == null\n"
+            "      ? null\n"
+            "      : RegExp(r'^m(\\d+)\\.').firstMatch(item.rowKey!)?.group(1);\n"
+            "  final target = DshGoScope(sessionId: sessionId, messageId: messageId, turnId: turnId);",
+        ))
+
     if with_dex:
         plan.append((
             "app/android/app/src/main/AndroidManifest.xml",
@@ -208,7 +221,7 @@ def preflight(root, plan, newfiles):
 def main():
     args = sys.argv[1:]
     if len(args) < 2:
-        sys.exit("用法: apply_autonomous.py <src-dir> <owner/repo> [--with-data-extraction] [--telemetry-default-off] [--single-market-source] [--lazy-relay-login] [--forum-default-empty] [--dry-run]")
+        sys.exit("用法: apply_autonomous.py <src-dir> <owner/repo> [--with-data-extraction] [--telemetry-default-off] [--single-market-source] [--lazy-relay-login] [--forum-default-empty] [--recall-turn-id] [--dry-run]")
     root = pathlib.Path(args[0])
     repo = args[1]
     opts = args[2:]
@@ -217,6 +230,7 @@ def main():
     single_market = False
     lazy_relay = False
     forum_empty = False
+    recall_turn_id = False
     dry_run = False
     for o in opts:
         if o == "--with-data-extraction":
@@ -229,12 +243,14 @@ def main():
             lazy_relay = True
         elif o == "--forum-default-empty":
             forum_empty = True
+        elif o == "--recall-turn-id":
+            recall_turn_id = True
         elif o == "--dry-run":
             dry_run = True
         else:
             sys.exit("未知参数: {!r}".format(o))
 
-    plan, newfiles = build_plan(root, repo, with_dex, telemetry_off, single_market, lazy_relay, forum_empty)
+    plan, newfiles = build_plan(root, repo, with_dex, telemetry_off, single_market, lazy_relay, forum_empty, recall_turn_id)
     preflight(root, plan, newfiles)
     if dry_run:
         print("dry-run: 全部 {} 项补丁锚点 + {} 个新文件校验通过，未写入。".format(len(plan), len(newfiles)))
@@ -250,7 +266,8 @@ def main():
           "| 遥测默认关:", "是" if telemetry_off else "否",
           "| 市场索引单源:", "是" if single_market else "否",
           "| 远程登录按需:", "是" if lazy_relay else "否",
-          "| 论坛默认留空:", "是" if forum_empty else "否")
+          "| 论坛默认留空:", "是" if forum_empty else "否",
+          "| 菜单补回合号:", "是" if recall_turn_id else "否")
 
 
 if __name__ == "__main__":

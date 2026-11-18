@@ -82,6 +82,9 @@ GUARDS: list[tuple[str, str, str]] = [
     ("app/lib/forum/forum_config.dart",
      "const forumDefaultBaseUrl = '';",
      "论坛默认地址补丁仍在"),
+    ("app/lib/ui/plugins/native/message_plugin_menu.dart",
+     "final target = DshGoScope(sessionId: sessionId, messageId: messageId, turnId: turnId);",
+     "菜单 scope 已补回合号（尾注定位所依赖）"),
     # 以下为上游安全默认值哨兵：这些文件未打补丁，仅监控默认值是否被改松。
     ("app/android/app/src/main/kotlin/io/github/ccch1mneyyy/dsh_app/phone/SafetyGate.kt",
      "val confirmMode: ConfirmMode = ConfirmMode.ASK",
@@ -126,6 +129,9 @@ FORBIDDEN: list[tuple[str, str, str]] = [
     ("app/lib/forum/forum_config.dart",
      "forumDefaultBaseUrl = 'https://",
      "论坛默认地址旧值未残留"),
+    ("app/lib/ui/plugins/native/message_plugin_menu.dart",
+     "DshGoScope(sessionId: sessionId, messageId: messageId);",
+     "菜单 scope 缺回合号的旧行已消失（双侧锚定）"),
 ]
 
 

@@ -33,7 +33,7 @@ apply = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(apply)
 
 ALL_FLAGS = ["--telemetry-default-off", "--single-market-source",
-             "--lazy-relay-login", "--forum-default-empty"]
+             "--lazy-relay-login", "--forum-default-empty", "--recall-turn-id"]
 FILES = {
     "update": "app/lib/update/update_config.dart",
     "release": "tooling/release_assets.py",
@@ -41,6 +41,7 @@ FILES = {
     "market": "app/lib/state/plugins/plugin_market.dart",
     "hosts": "app/lib/state/hosts_state.dart",
     "forum": "app/lib/forum/forum_config.dart",
+    "menu": "app/lib/ui/plugins/native/message_plugin_menu.dart",
 }
 
 
@@ -54,7 +55,7 @@ class AnchorIntentTests(unittest.TestCase):
         if not UPSTREAM.is_dir():
             raise RuntimeError("基线源码目录不存在，请设置 DSH_UPSTREAM_SRC: %s" % UPSTREAM)
         cls.plan, cls.newfiles = apply.build_plan(pathlib.Path("/"), "damemod/Dharness",
-                                                   False, True, True, True, True)
+                                                   False, True, True, True, True, True)
 
     def anchors_for(self, key):
         return [a for a in self.plan if a[0] == FILES[key]]
@@ -219,10 +220,55 @@ class AnchorIntentTests(unittest.TestCase):
         self.assertEqual(result.count("officialMarketFresh"), market.count("officialMarketFresh"))
 
     def test_I9_every_plan_anchor_unique_on_baseline(self):
-        """I9：基线全树 12 锚点各恰好命中 1 处（不是只测某几个）。"""
+        """I9：基线全树所有锚点各恰好命中 1 处（不是只测某几个）。"""
         for rel, old, new in self.plan:
             text = (UPSTREAM / rel).read_text(encoding="utf-8")
             self.assertEqual(self.count(text, old), 1, "基线锚点应唯一: %s / %s" % (rel, old[:50]))
+
+    def anchors_for_menu(self):
+        return [a for a in self.plan if a[0] == FILES["menu"]]
+
+    def test_I10_turn_id_anchor_wired(self):
+        """I10：菜单 scope 补回合号——锚点唯一、产物含解析逻辑且传给 DshGoScope。"""
+        anchors = self.anchors_for_menu()
+        self.assertEqual(len(anchors), 1, "菜单补回合号应恰好 1 个锚点")
+        rel, old, new = anchors[0]
+        self.assertIn("DshGoScope", old)
+        # 产物必须：①解析 rowKey ②传给 DshGoScope ③rowKey 为空安全降级
+        self.assertIn("item.rowKey", new, "应从 rowKey 解析回合号")
+        self.assertIn(r"RegExp(r'^m(\d+)\.')", new, "应认 m<turn>.<step> 格式")
+        self.assertIn("turnId: turnId", new, "应把回合号传进 scope")
+        self.assertIn("? null", new, "rowKey 缺失应降级为 null")
+        # 基线唯一
+        self.assertEqual(self.count(read("menu"), old), 1)
+
+    def test_I11_turn_regex_parses_real_rowkeys(self):
+        """I11：回合号正则对真实 rowKey 形态正确解析，畸形/缺失安全降级（多场景）。"""
+        # 与产物中 Dart 正则等价的 Python 表达，验证解析意图而非具体实现
+        import re as _re
+        rx = _re.compile(r"^m(\d+)\.")
+        cases = {
+            "m7.3": "7", "m0.1": "0", "m128.9": "128",
+            "d-attempt-x": None, "m.step": None, "": None,
+        }
+        for rowkey, expected in cases.items():
+            m = rx.match(rowkey)
+            self.assertEqual(m.group(1) if m else None, expected,
+                             "rowKey %r 解析应得 %r" % (rowkey, expected))
+
+    def test_I12_turn_id_fail_closed_on_duplicate(self):
+        """I12：菜单锚点重复时 fail-closed，preflight 在任何写入前拒绝。"""
+        anchor = self.anchors_for_menu()[0]
+        with tempfile.TemporaryDirectory() as td:
+            root = pathlib.Path(td)
+            target = root / FILES["menu"]
+            target.parent.mkdir(parents=True, exist_ok=True)
+            # 人为制造重复锚点
+            line = anchor[1] + "\n" + anchor[1] + "\n"
+            target.write_text(line, encoding="utf-8")
+            self.assertEqual(self.count(target.read_text(encoding="utf-8"), anchor[1]), 2)
+            with self.assertRaises(SystemExit):
+                apply.preflight(root, [anchor], [])
 
 
 if __name__ == "__main__":
