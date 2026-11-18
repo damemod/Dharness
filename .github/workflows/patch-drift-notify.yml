@@ -1,0 +1,62 @@
+name: patch-drift-notify
+
+on:
+  workflow_run:
+    workflows: ["autonomous-release"]
+    types: [completed]
+
+permissions:
+  issues: write
+  actions: read
+
+jobs:
+  notify:
+    if: ${{ github.event.workflow_run.conclusion == 'failure' }}
+    runs-on: ubuntu-24.04
+    steps:
+      - name: 检查是否确为补丁漂移失败
+        id: detect
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_ID: ${{ github.event.workflow_run.id }}
+        run: |
+          set -euo pipefail
+          if ! gh api "repos/${{ github.repository }}/actions/runs/$RUN_ID/logs" > run-log.zip; then
+            echo "::warning::日志已过期或不可访问（run $RUN_ID），本次跳过漂移判定"
+            echo "hit=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          # 只认补丁目标文件路径 + 锚点硬失败文案的组合，避免通用短语误报。
+          if unzip -p run-log.zip 2>/dev/null | grep -qE "(app/lib/(update|usage|state|forum)/|tooling/release_assets\.py|AndroidManifest\.xml).*(预期 [0-9]+ 处，实得|文件不存在|已存在，拒绝覆盖)"; then
+            echo "hit=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "hit=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: 开或更新 patch-drift Issue
+        if: steps.detect.outputs.hit == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_URL: ${{ github.event.workflow_run.html_url }}
+          HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          set -euo pipefail
+          TITLE="patch-drift: apply_autonomous 锚点失效 (自动)"
+          BODY=$(cat <<EOF
+          检测到补丁漂移（构建日志命中 apply_autonomous.py 锚点硬失败文案）。
+
+          - 失败 run: $RUN_URL
+          - head sha: $HEAD_SHA
+          - 原始日志: gh api repos/\${{ github.repository }}/actions/runs/${{ github.event.workflow_run.id }}/logs
+
+          修复流程：diagnose 拿失败日志 -> 找新锚点 -> propose 出 diff -> verify 门禁通过 -> review 后合并 PR。
+          EOF
+          )
+          EXISTING=$(gh issue list --repo "${{ github.repository }}" --state open --search "$TITLE in:title" --json number --jq '.[0].number // empty')
+          if [ -n "$EXISTING" ]; then
+            gh issue comment "$EXISTING" --repo "${{ github.repository }}" --body "$BODY"
+            echo "已评论现有 Issue #$EXISTING"
+          else
+            gh issue create --repo "${{ github.repository }}" --title "$TITLE" --body "$BODY" --label "patch-drift"
+            echo "已新建 Issue"
+          fi

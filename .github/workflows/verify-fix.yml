@@ -1,0 +1,70 @@
+name: verify-fix
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  verify:
+    if: startsWith(github.head_ref, 'patch-fix/')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: 检出 PR 头（含补丁脚本与检查器）
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: 解析目标上游 tag
+        id: tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BRANCH: ${{ github.head_ref }}
+        run: |
+          set -euo pipefail
+          TAG="${BRANCH#patch-fix/}"
+          case "$TAG" in v*) ;; *) echo "分支名不含合法 tag: $BRANCH"; exit 1;; esac
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+
+      - name: 检出对应上游源码（与 autonomous-release 同 tag）
+        uses: actions/checkout@v4
+        with:
+          repository: ccch1mneyyy/dsh-Go
+          ref: ${{ steps.tag.outputs.tag }}
+          persist-credentials: false
+          path: upstream
+
+      - name: 门禁 1/2：应用修复后的补丁（fail-closed）
+        env:
+          SELF_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          python3 patches/apply_autonomous.py upstream "$SELF_REPO" \
+            --telemetry-default-off --single-market-source --lazy-relay-login --forum-default-empty
+
+      - name: 门禁 2/2：补丁后语义检查（--strict 失败即 exit 1）
+        run: |
+          set -euo pipefail
+          python3 scripts/check_build_config.py upstream --strict
+
+      - name: 门禁通过 -> 评论等待人工合并
+        if: success()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.pull_request.number }}
+        run: |
+          gh pr comment "$PR" --repo "${{ github.repository }}" \
+            --body "门禁通过（补丁应用 fail-closed + check_build_config.py --strict 语义检查）。请 review 后手动合并；本 workflow 不会自动合并。"
+
+      - name: 门禁失败 -> 评论阻止合并
+        if: failure()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.pull_request.number }}
+        run: |
+          gh pr comment "$PR" --repo "${{ github.repository }}" \
+            --body "门禁未通过，请勿合并。查看 verify job 日志定位锚点失败或语义检查失败。"
