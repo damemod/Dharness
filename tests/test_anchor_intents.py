@@ -36,7 +36,7 @@ _spec.loader.exec_module(apply)
 
 ALL_FLAGS = ["--telemetry-default-off", "--single-market-source",
              "--lazy-relay-login", "--forum-default-empty", "--recall-turn-id",
-             "--recall-footnote", "--plugin-dismiss"]
+             "--recall-footnote", "--plugin-dismiss", "--recall-user-msg"]
 FILES = {
     "update": "app/lib/update/update_config.dart",
     "release": "tooling/release_assets.py",
@@ -48,6 +48,8 @@ FILES = {
     "footnote": "app/lib/ui/chat/widgets/turn_footnote.dart",
     "effects": "app/lib/plugins/native/native_effects.dart",
     "taps": "app/lib/ui/plugins/native/native_taps.dart",
+    "bubble": "app/lib/ui/chat/widgets/user_bubble.dart",
+    "chatlist": "app/lib/ui/chat/chat_list.dart",
 }
 
 
@@ -61,7 +63,7 @@ class AnchorIntentTests(unittest.TestCase):
         if not UPSTREAM.is_dir():
             raise RuntimeError("基线源码目录不存在，请设置 DSH_UPSTREAM_SRC: %s" % UPSTREAM)
         cls.plan, cls.newfiles = apply.build_plan(pathlib.Path("/"), "damemod/Dharness",
-                                                   False, True, True, True, True, True, True, True)
+                                                   False, True, True, True, True, True, True, True, True)
 
     def anchors_for(self, key):
         return [a for a in self.plan if a[0] == FILES[key]]
@@ -232,7 +234,9 @@ class AnchorIntentTests(unittest.TestCase):
             self.assertEqual(self.count(text, old), 1, "基线锚点应唯一: %s / %s" % (rel, old[:50]))
 
     def anchors_for_menu(self):
-        return [a for a in self.plan if a[0] == FILES["menu"]]
+        # 只取把 scope 从 2 参改成 3 参（补 turnId）的那条，不含用户消息 helper。
+        return [a for a in self.plan
+                if a[0] == FILES["menu"] and "turnId: turnId" in a[2]]
 
     def test_I10_turn_id_anchor_wired(self):
         """I10：菜单 scope 补回合号——锚点唯一、产物含解析逻辑且传给 DshGoScope。"""
@@ -333,6 +337,51 @@ class AnchorIntentTests(unittest.TestCase):
         return [a for a in self.plan
                 if a[0] in (FILES["effects"], FILES["taps"])
                 and "dismiss" in a[2]]
+
+    def anchors_for_user_msg(self):
+        markers = ("nativeUserMessageMenuGroups", "recall-user", "pluginMessageId",
+                   "../../plugins/native/message_plugin_menu.dart';")
+        return [a for a in self.plan
+                if a[0] in (FILES["menu"], FILES["bubble"], FILES["chatlist"])
+                and any(m in a[2] for m in markers)]
+
+    def test_I17_user_msg_anchors_wired(self):
+        """I17：用户消息反馈 7 锚点齐全、唯一、只传稳定 id、不碰现有 scope 构造行。"""
+        anchors = self.anchors_for_user_msg()
+        self.assertEqual(len(anchors), 7, "用户消息反馈应恰好 7 个锚点")
+        menu = [a for a in anchors if a[0] == FILES["menu"]]
+        bubble = [a for a in anchors if a[0] == FILES["bubble"]]
+        chatlist = [a for a in anchors if a[0] == FILES["chatlist"]]
+        self.assertEqual(len(menu), 2)
+        self.assertEqual(len(bubble), 4)
+        self.assertEqual(len(chatlist), 1)
+        # helper 只构造指向、绝不传原文；assistant 入口过滤掉 recall-user。
+        helper = next(a for a in menu if "nativeUserMessageMenuGroups(BuildContext" in a[2])
+        self.assertIn("DshGoScope(sessionId: sessionId, messageId: requestId)", helper[2])
+        # helper 新增的 user 分支里不传 message（原 assistant 行保留，故只看 helper 之后的部分）。
+        user_part = helper[2][helper[2].index("nativeUserMessageMenuGroups(BuildContext"):]
+        self.assertNotIn("message:", user_part, "用户消息菜单绝不转发原文（防密钥泄露）")
+        filt = next(a for a in menu if "recall-user" in a[2] and "where" in a[2])
+        self.assertNotIn("DshGoScope(sessionId: sessionId, messageId: messageId);", filt[2],
+                         "不得写出被 FORBIDDEN 禁止的 2 参 scope 字面量")
+        # 每个锚点在基线唯一。
+        for anchor in anchors:
+            self.assertEqual(self.count(read(
+                "menu" if anchor[0] == FILES["menu"] else
+                "bubble" if anchor[0] == FILES["bubble"] else "chatlist"), anchor[1]), 1,
+                "锚点 old 应在基线唯一: %s" % anchor[1][:50])
+
+    def test_I18_user_msg_fail_closed_on_duplicate(self):
+        """I18：用户消息反馈任一锚点重复时 preflight 在任何写入前拒绝。"""
+        for anchor in self.anchors_for_user_msg():
+            with self.subTest(path=anchor[0], old=anchor[1][:40]):
+                with tempfile.TemporaryDirectory() as td:
+                    root = pathlib.Path(td)
+                    target = root / anchor[0]
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    target.write_text(anchor[1] + "\n" + anchor[1] + "\n", encoding="utf-8")
+                    with self.assertRaises(SystemExit):
+                        apply.preflight(root, [anchor], [])
 
     def test_I15_dismiss_anchors_wired(self):
         """I15：dismiss 两锚点在、唯一、产物识别 dismiss 并 pop 弹层。"""

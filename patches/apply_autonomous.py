@@ -12,6 +12,7 @@
   --recall-turn-id          可选：插件菜单 scope 补回合号，供消息尾注定位。
   --recall-footnote         可选：回合脚注窄屏时也保留并显示消息尾注。
   --plugin-dismiss          可选：允许插件动作 open:'dismiss' 关闭当前弹层。
+  --recall-user-msg         可选：用户消息长按挂反馈菜单，仅传稳定 id、不传原文。
   --dry-run                 可选：只校验所有锚点，不写入任何文件。
 
 锚点分两类，由 old 字符串的前缀区分：
@@ -94,7 +95,7 @@ DATA_EXTRACTION_RULES = """<?xml version="1.0" encoding="utf-8"?>
 """
 
 
-def build_plan(root, repo, with_dex, telemetry_off, single_market, lazy_relay, forum_empty, recall_turn_id, recall_footnote, plugin_dismiss):
+def build_plan(root, repo, with_dex, telemetry_off, single_market, lazy_relay, forum_empty, recall_turn_id, recall_footnote, plugin_dismiss, recall_user_msg):
     """返回补丁计划 [(rel, old, new)] 与新建文件计划 [(rel, content)]。"""
     plan = []
     newfiles = []
@@ -237,6 +238,105 @@ def build_plan(root, repo, with_dex, telemetry_off, single_market, lazy_relay, f
             "  final os = ref.read(operatingSystemProvider);",
         ))
 
+    if recall_user_msg:
+        # User-message feedback menu: attach only the 'recall-user' action, pass
+        # a durable requestId as the sole identifier, and never forward raw text
+        # (which may contain credentials). A separate helper is appended so the
+        # existing assistant scope construction line stays untouched.
+        plan.append((
+            "app/lib/ui/plugins/native/message_plugin_menu.dart",
+            "                unawaited(runNativeAction(host, ref, action, scope: target, message: text, composer: scope.host));\n"
+            "              },\n"
+            "            ),\n"
+            "        ],\n"
+            "      ),\n"
+            "  ];\n"
+            "}",
+            "                unawaited(runNativeAction(host, ref, action, scope: target, message: text, composer: scope.host));\n"
+            "              },\n"
+            "            ),\n"
+            "        ],\n"
+            "      ),\n"
+            "  ];\n"
+            "}\n"
+            "\n"
+            "/// The feedback action for a user message. Only a durable id is sent — never the raw\n"
+            "/// text, which may contain credentials. Exclusive to the user bubble's menu.\n"
+            "List<MenuGroup> nativeUserMessageMenuGroups(BuildContext context, {required String requestId}) {\n"
+            "  final scope = NativeComposerScope.of(context);\n"
+            "  final sessionId = scope?.host.sessionId;\n"
+            "  if (scope == null || sessionId == null) return const [];\n"
+            "  final ref = scope.ref;\n"
+            "  final plugins = ref.read(nativeMessageActionsProvider);\n"
+            "  final target = DshGoScope(sessionId: sessionId, messageId: requestId);\n"
+            "  return [\n"
+            "    for (final plugin in plugins)\n"
+            "      MenuGroup(\n"
+            "        title: ref.read(nativePluginTitleProvider(plugin.package)),\n"
+            "        items: [\n"
+            "          for (final action in plugin.messageActions)\n"
+            "            if (action.id == 'recall-user')\n"
+            "              MenuItem(\n"
+            "                icon: action.icon ?? AppIcons.plugin,\n"
+            "                label: action.label,\n"
+            "                onTap: () {\n"
+            "                  final host = scope.host.context;\n"
+            "                  if (host == null || !host.mounted) return;\n"
+            "                  unawaited(runNativeAction(host, ref, action, scope: target, composer: scope.host));\n"
+            "                },\n"
+            "              ),\n"
+            "        ],\n"
+            "      ),\n"
+            "  ];\n"
+            "}",
+        ))
+        # Keep the user-only action out of the assistant menu.
+        plan.append((
+            "app/lib/ui/plugins/native/message_plugin_menu.dart",
+            "          for (final action in plugin.messageActions)\n"
+            "            MenuItem(",
+            "          for (final action in plugin.messageActions.where((a) => a.id != 'recall-user'))\n"
+            "            MenuItem(",
+        ))
+        # Import the helper into the user bubble.
+        plan.append((
+            "app/lib/ui/chat/widgets/user_bubble.dart",
+            "import 'quote_chip.dart';",
+            "import 'quote_chip.dart';\nimport '../../plugins/native/message_plugin_menu.dart';",
+        ))
+        # Add an optional stable-id field to UserBubble.
+        plan.append((
+            "app/lib/ui/chat/widgets/user_bubble.dart",
+            "    this.onEdit,\n  });",
+            "    this.onEdit,\n    this.pluginMessageId,\n  });",
+        ))
+        plan.append((
+            "app/lib/ui/chat/widgets/user_bubble.dart",
+            "  final VoidCallback? onEdit;",
+            "  final VoidCallback? onEdit;\n\n"
+            "  /// Stable id of a durable user message, for the plugin feedback menu.\n"
+            "  /// Null on optimistic bubbles (not yet echoed): no menu is attached.\n"
+            "  final String? pluginMessageId;",
+        ))
+        # Attach the plugin menu group to the bubble's long-press menu.
+        plan.append((
+            "app/lib/ui/chat/widgets/user_bubble.dart",
+            "      actions: [MessageAction.copy, MessageAction.selectText, if (onEdit != null) MessageAction.edit],",
+            "      actions: [MessageAction.copy, MessageAction.selectText, if (onEdit != null) MessageAction.edit],\n"
+            "      extra: pluginMessageId == null\n"
+            "          ? const []\n"
+            "          : nativeUserMessageMenuGroups(context, requestId: pluginMessageId!),",
+        ))
+        # Echoed user rows carry their requestId; optimistic rows do not.
+        plan.append((
+            "app/lib/ui/chat/chat_list.dart",
+            "      UserRow(:final item) => UserBubble(\n"
+            "        text: withoutAppNotes(item.text),",
+            "      UserRow(:final item) => UserBubble(\n"
+            "        text: withoutAppNotes(item.text),\n"
+            "        pluginMessageId: item.requestId,",
+        ))
+
     if with_dex:
         plan.append((
             "app/android/app/src/main/AndroidManifest.xml",
@@ -268,7 +368,7 @@ def preflight(root, plan, newfiles):
 def main():
     args = sys.argv[1:]
     if len(args) < 2:
-        sys.exit("用法: apply_autonomous.py <src-dir> <owner/repo> [--with-data-extraction] [--telemetry-default-off] [--single-market-source] [--lazy-relay-login] [--forum-default-empty] [--recall-turn-id] [--recall-footnote] [--plugin-dismiss] [--dry-run]")
+        sys.exit("用法: apply_autonomous.py <src-dir> <owner/repo> [--with-data-extraction] [--telemetry-default-off] [--single-market-source] [--lazy-relay-login] [--forum-default-empty] [--recall-turn-id] [--recall-footnote] [--plugin-dismiss] [--recall-user-msg] [--dry-run]")
     root = pathlib.Path(args[0])
     repo = args[1]
     opts = args[2:]
@@ -280,6 +380,7 @@ def main():
     recall_turn_id = False
     recall_footnote = False
     plugin_dismiss = False
+    recall_user_msg = False
     dry_run = False
     for o in opts:
         if o == "--with-data-extraction":
@@ -298,12 +399,14 @@ def main():
             recall_footnote = True
         elif o == "--plugin-dismiss":
             plugin_dismiss = True
+        elif o == "--recall-user-msg":
+            recall_user_msg = True
         elif o == "--dry-run":
             dry_run = True
         else:
             sys.exit("未知参数: {!r}".format(o))
 
-    plan, newfiles = build_plan(root, repo, with_dex, telemetry_off, single_market, lazy_relay, forum_empty, recall_turn_id, recall_footnote, plugin_dismiss)
+    plan, newfiles = build_plan(root, repo, with_dex, telemetry_off, single_market, lazy_relay, forum_empty, recall_turn_id, recall_footnote, plugin_dismiss, recall_user_msg)
     preflight(root, plan, newfiles)
     if dry_run:
         print("dry-run: 全部 {} 项补丁锚点 + {} 个新文件校验通过，未写入。".format(len(plan), len(newfiles)))
@@ -322,7 +425,8 @@ def main():
           "| 论坛默认留空:", "是" if forum_empty else "否",
           "| 菜单补回合号:", "是" if recall_turn_id else "否",
           "| 脚注保留尾注:", "是" if recall_footnote else "否",
-          "| 插件关闭弹层:", "是" if plugin_dismiss else "否")
+          "| 插件关闭弹层:", "是" if plugin_dismiss else "否",
+          "| 用户消息反馈:", "是" if recall_user_msg else "否")
 
 
 if __name__ == "__main__":
