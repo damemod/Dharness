@@ -10,6 +10,7 @@
   --lazy-relay-login        可选：远程登录方式改为按需获取。
   --forum-default-empty     可选：论坛地址默认留空（需要时在设置里填，仍可用）。
   --recall-turn-id          可选：插件菜单 scope 补回合号，供消息尾注定位。
+  --recall-footnote         可选：回合脚注窄屏时也保留并显示消息尾注。
   --dry-run                 可选：只校验所有锚点，不写入任何文件。
 
 锚点分两类，由 old 字符串的前缀区分：
@@ -92,7 +93,7 @@ DATA_EXTRACTION_RULES = """<?xml version="1.0" encoding="utf-8"?>
 """
 
 
-def build_plan(root, repo, with_dex, telemetry_off, single_market, lazy_relay, forum_empty, recall_turn_id):
+def build_plan(root, repo, with_dex, telemetry_off, single_market, lazy_relay, forum_empty, recall_turn_id, recall_footnote):
     """返回补丁计划 [(rel, old, new)] 与新建文件计划 [(rel, content)]。"""
     plan = []
     newfiles = []
@@ -190,6 +191,25 @@ def build_plan(root, repo, with_dex, telemetry_off, single_market, lazy_relay, f
             "  final target = DshGoScope(sessionId: sessionId, messageId: messageId, turnId: turnId);",
         ))
 
+    if recall_footnote:
+        # 回合脚注窄屏也保留消息尾注：variants 增加只含时间与 note 的窄屏档，
+        # 宽度不足时优先牺牲步数/耗时/token 而不是尾注。
+        plan.append((
+            "app/lib/ui/chat/widgets/turn_footnote.dart",
+            "      if (note != null) join([time, steps, cost, tokens, note]),\n"
+            "      join([time, steps, cost, tokens]),",
+            "      if (note != null) join([time, steps, cost, tokens, note]),\n"
+            "      if (note != null) join([time, note]),\n"
+            "      join([time, steps, cost, tokens]),",
+        ))
+        # 上色条件：任何以 note 结尾的档位都上色，不再只认最长的 options.first。
+        # notes.text 为空时 endsWith 恒真，加 isNotEmpty 守卫避免误伤普通脚注。
+        plan.append((
+            "app/lib/ui/chat/widgets/turn_footnote.dart",
+            "                      child: notes != null && text == options.first",
+            "                      child: notes != null && notes.text.isNotEmpty && text.endsWith(notes.text)",
+        ))
+
     if with_dex:
         plan.append((
             "app/android/app/src/main/AndroidManifest.xml",
@@ -221,7 +241,7 @@ def preflight(root, plan, newfiles):
 def main():
     args = sys.argv[1:]
     if len(args) < 2:
-        sys.exit("用法: apply_autonomous.py <src-dir> <owner/repo> [--with-data-extraction] [--telemetry-default-off] [--single-market-source] [--lazy-relay-login] [--forum-default-empty] [--recall-turn-id] [--dry-run]")
+        sys.exit("用法: apply_autonomous.py <src-dir> <owner/repo> [--with-data-extraction] [--telemetry-default-off] [--single-market-source] [--lazy-relay-login] [--forum-default-empty] [--recall-turn-id] [--recall-footnote] [--dry-run]")
     root = pathlib.Path(args[0])
     repo = args[1]
     opts = args[2:]
@@ -231,6 +251,7 @@ def main():
     lazy_relay = False
     forum_empty = False
     recall_turn_id = False
+    recall_footnote = False
     dry_run = False
     for o in opts:
         if o == "--with-data-extraction":
@@ -245,12 +266,14 @@ def main():
             forum_empty = True
         elif o == "--recall-turn-id":
             recall_turn_id = True
+        elif o == "--recall-footnote":
+            recall_footnote = True
         elif o == "--dry-run":
             dry_run = True
         else:
             sys.exit("未知参数: {!r}".format(o))
 
-    plan, newfiles = build_plan(root, repo, with_dex, telemetry_off, single_market, lazy_relay, forum_empty, recall_turn_id)
+    plan, newfiles = build_plan(root, repo, with_dex, telemetry_off, single_market, lazy_relay, forum_empty, recall_turn_id, recall_footnote)
     preflight(root, plan, newfiles)
     if dry_run:
         print("dry-run: 全部 {} 项补丁锚点 + {} 个新文件校验通过，未写入。".format(len(plan), len(newfiles)))
@@ -267,7 +290,8 @@ def main():
           "| 市场索引单源:", "是" if single_market else "否",
           "| 远程登录按需:", "是" if lazy_relay else "否",
           "| 论坛默认留空:", "是" if forum_empty else "否",
-          "| 菜单补回合号:", "是" if recall_turn_id else "否")
+          "| 菜单补回合号:", "是" if recall_turn_id else "否",
+          "| 脚注保留尾注:", "是" if recall_footnote else "否")
 
 
 if __name__ == "__main__":

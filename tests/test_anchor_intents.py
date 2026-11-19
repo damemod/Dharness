@@ -42,6 +42,7 @@ FILES = {
     "hosts": "app/lib/state/hosts_state.dart",
     "forum": "app/lib/forum/forum_config.dart",
     "menu": "app/lib/ui/plugins/native/message_plugin_menu.dart",
+    "footnote": "app/lib/ui/chat/widgets/turn_footnote.dart",
 }
 
 
@@ -55,7 +56,7 @@ class AnchorIntentTests(unittest.TestCase):
         if not UPSTREAM.is_dir():
             raise RuntimeError("基线源码目录不存在，请设置 DSH_UPSTREAM_SRC: %s" % UPSTREAM)
         cls.plan, cls.newfiles = apply.build_plan(pathlib.Path("/"), "damemod/Dharness",
-                                                   False, True, True, True, True, True)
+                                                   False, True, True, True, True, True, True)
 
     def anchors_for(self, key):
         return [a for a in self.plan if a[0] == FILES[key]]
@@ -269,6 +270,59 @@ class AnchorIntentTests(unittest.TestCase):
             self.assertEqual(self.count(target.read_text(encoding="utf-8"), anchor[1]), 2)
             with self.assertRaises(SystemExit):
                 apply.preflight(root, [anchor], [])
+
+    def anchors_for_footnote(self):
+        return [a for a in self.plan if a[0] == FILES["footnote"]]
+
+    def test_I13_footnote_anchors_wired(self):
+        """I13：脚注补丁两个锚点都在、各自唯一、产物含窄屏档与宽泛上色条件。"""
+        anchors = self.anchors_for_footnote()
+        self.assertEqual(len(anchors), 2, "脚注补丁应恰好 2 个锚点")
+        variants = next(a for a in anchors if "join([time, note])" in a[2])
+        colored = next(a for a in anchors if "endsWith" in a[2])
+        # 窄屏档：新档只保留 time+note，且排在全量档之后、无 note 档之前
+        self.assertIn("join([time, note])", variants[2])
+        self.assertLess(variants[2].index("join([time, steps, cost, tokens, note])"),
+                        variants[2].index("join([time, note])"), "窄屏档应在全量档之后")
+        self.assertLess(variants[2].index("join([time, note])"),
+                        variants[2].index("join([time, steps, cost, tokens])"), "窄屏档应在无 note 档之前")
+        # 上色条件：不认 options.first，认以 notes.text 结尾，且有空值守卫
+        self.assertNotIn("text == options.first", colored[2])
+        self.assertIn("text.endsWith(notes.text)", colored[2])
+        self.assertIn("notes.text.isNotEmpty", colored[2], "空 note 不应误上色")
+        # 基线两锚点各唯一
+        self.assertEqual(self.count(read("footnote"), variants[1]), 1)
+        self.assertEqual(self.count(read("footnote"), colored[1]), 1)
+
+    def test_I14_footnote_variant_selection_keeps_note_on_narrow(self):
+        """I14：模拟 variants 宽度回退——窄屏优先保留 note（多档位多宽度，非单点）。"""
+        # 复刻补丁后 variants 的档位顺序（time/steps/cost/tokens 固定，note 可切）
+        time, steps, cost, tokens, note = "5分", "14步", "1.8M", "2万tokens", "已撤回·说错了"
+        join = lambda parts: " · ".join(parts)
+        options = [
+            join([time, steps, cost, tokens, note]),
+            join([time, note]),
+            join([time, steps, cost, tokens]),
+            join([time, steps, cost]),
+            join([time, cost]),
+            time,
+        ]
+        def pick(room):
+            return next((o for o in options if len(o) <= room), options[-1])
+        note_options = [o for o in options if o.endswith(note)]
+        plain_options = [o for o in options if not o.endswith(note)]
+        narrow = min(note_options, key=len)
+        # 意图①：窄屏档必须存在，且比最短的无 note 档更省宽度——宽度不够时才轮到它
+        self.assertLess(len(narrow), len(plain_options[0]),
+                        "窄屏档应比无 note 档更省宽度，才能在窄屏被选中")
+        # 意图②：只要 room 放得下最窄的带 note 档，firstWhere 选中的档必定带 note
+        for room in [len(narrow), len(narrow) + 5, len(narrow) + 50, 500]:
+            self.assertTrue(pick(room).endswith(note),
+                            "room=%d 选中 %r 应保留 note" % (room, pick(room)))
+        # 意图③：room 连窄屏档都放不下时，才丢 note（没有任何带 note 档放得下）
+        tiny = pick(len(narrow) - 1)
+        self.assertFalse(tiny.endswith(note),
+                         "room 不足最窄带 note 档时应退到无 note 档，实际 %r" % tiny)
 
 
 if __name__ == "__main__":

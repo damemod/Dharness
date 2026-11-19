@@ -44,7 +44,7 @@ jobs:
         run: |
           set -euo pipefail
           python3 patches/apply_autonomous.py upstream "$SELF_REPO" \
-            --telemetry-default-off --single-market-source --lazy-relay-login --forum-default-empty --recall-turn-id
+            --telemetry-default-off --single-market-source --lazy-relay-login --forum-default-empty --recall-turn-id --recall-footnote
 
       - name: 门禁 2/2：补丁后语义检查（--strict 失败即 exit 1）
         run: |
