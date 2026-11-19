@@ -239,10 +239,10 @@ def build_plan(root, repo, with_dex, telemetry_off, single_market, lazy_relay, f
         ))
 
     if recall_user_msg:
-        # User-message feedback menu: attach only the 'recall-user' action, pass
+        # User-message feedback menu: attach the shared 'recall' action, pass
         # a durable requestId as the sole identifier, and never forward raw text
-        # (which may contain credentials). A separate helper is appended so the
-        # existing assistant scope construction line stays untouched.
+        # or a turn id (which may contain credentials). A separate helper is
+        # appended so the existing assistant scope construction line stays untouched.
         plan.append((
             "app/lib/ui/plugins/native/message_plugin_menu.dart",
             "                unawaited(runNativeAction(host, ref, action, scope: target, message: text, composer: scope.host));\n"
@@ -275,7 +275,7 @@ def build_plan(root, repo, with_dex, telemetry_off, single_market, lazy_relay, f
             "        title: ref.read(nativePluginTitleProvider(plugin.package)),\n"
             "        items: [\n"
             "          for (final action in plugin.messageActions)\n"
-            "            if (action.id == 'recall-user')\n"
+            "            if (action.id == 'recall')\n"
             "              MenuItem(\n"
             "                icon: action.icon ?? AppIcons.plugin,\n"
             "                label: action.label,\n"
@@ -289,14 +289,6 @@ def build_plan(root, repo, with_dex, telemetry_off, single_market, lazy_relay, f
             "      ),\n"
             "  ];\n"
             "}",
-        ))
-        # Keep the user-only action out of the assistant menu.
-        plan.append((
-            "app/lib/ui/plugins/native/message_plugin_menu.dart",
-            "          for (final action in plugin.messageActions)\n"
-            "            MenuItem(",
-            "          for (final action in plugin.messageActions.where((a) => a.id != 'recall-user'))\n"
-            "            MenuItem(",
         ))
         # Import the helper into the user bubble.
         plan.append((

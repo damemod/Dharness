@@ -339,30 +339,28 @@ class AnchorIntentTests(unittest.TestCase):
                 and "dismiss" in a[2]]
 
     def anchors_for_user_msg(self):
-        markers = ("nativeUserMessageMenuGroups", "recall-user", "pluginMessageId",
+        markers = ("nativeUserMessageMenuGroups", "action.id == 'recall'", "pluginMessageId",
                    "../../plugins/native/message_plugin_menu.dart';")
         return [a for a in self.plan
                 if a[0] in (FILES["menu"], FILES["bubble"], FILES["chatlist"])
                 and any(m in a[2] for m in markers)]
 
     def test_I17_user_msg_anchors_wired(self):
-        """I17：用户消息反馈 7 锚点齐全、唯一、只传稳定 id、不碰现有 scope 构造行。"""
+        """I17：用户消息反馈 6 锚点齐全、唯一、只传稳定 id、不碰现有 scope 构造行。"""
         anchors = self.anchors_for_user_msg()
-        self.assertEqual(len(anchors), 7, "用户消息反馈应恰好 7 个锚点")
+        self.assertEqual(len(anchors), 6, "用户消息反馈应恰好 6 个锚点")
         menu = [a for a in anchors if a[0] == FILES["menu"]]
         bubble = [a for a in anchors if a[0] == FILES["bubble"]]
         chatlist = [a for a in anchors if a[0] == FILES["chatlist"]]
-        self.assertEqual(len(menu), 2)
+        self.assertEqual(len(menu), 1)
         self.assertEqual(len(bubble), 4)
         self.assertEqual(len(chatlist), 1)
-        # helper 只构造指向、绝不传原文；assistant 入口过滤掉 recall-user。
+        # helper 只构造指向、绝不传原文；用户入口复用共享的 'recall' action。
         helper = next(a for a in menu if "nativeUserMessageMenuGroups(BuildContext" in a[2])
         self.assertIn("DshGoScope(sessionId: sessionId, messageId: requestId)", helper[2])
-        # helper 新增的 user 分支里不传 message（原 assistant 行保留，故只看 helper 之后的部分）。
         user_part = helper[2][helper[2].index("nativeUserMessageMenuGroups(BuildContext"):]
         self.assertNotIn("message:", user_part, "用户消息菜单绝不转发原文（防密钥泄露）")
-        filt = next(a for a in menu if "recall-user" in a[2] and "where" in a[2])
-        self.assertNotIn("DshGoScope(sessionId: sessionId, messageId: messageId);", filt[2],
+        self.assertNotIn("DshGoScope(sessionId: sessionId, messageId: messageId);", helper[2],
                          "不得写出被 FORBIDDEN 禁止的 2 参 scope 字面量")
         # 每个锚点在基线唯一。
         for anchor in anchors:
