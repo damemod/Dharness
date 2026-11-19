@@ -12,6 +12,8 @@
   I8 捕获组保形：多行块锚点只改中间 return，保留 if 头与闭合括号。
 
    I9 基线唯一：全树每个计划锚点各恰好命中 1 处。
+   I15 dismiss 锚点接线：解析与执行两锚点在、唯一、产物识别 dismiss 并 pop 弹层。
+   I16 dismiss fail-closed：任一锚点重复时 preflight 拒绝写入。
 
 每个意图含多个场景、多条断言。基线源码目录由 DSH_UPSTREAM_SRC 环境变量指定。
 """
@@ -33,7 +35,8 @@ apply = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(apply)
 
 ALL_FLAGS = ["--telemetry-default-off", "--single-market-source",
-             "--lazy-relay-login", "--forum-default-empty", "--recall-turn-id"]
+             "--lazy-relay-login", "--forum-default-empty", "--recall-turn-id",
+             "--recall-footnote", "--plugin-dismiss"]
 FILES = {
     "update": "app/lib/update/update_config.dart",
     "release": "tooling/release_assets.py",
@@ -43,6 +46,8 @@ FILES = {
     "forum": "app/lib/forum/forum_config.dart",
     "menu": "app/lib/ui/plugins/native/message_plugin_menu.dart",
     "footnote": "app/lib/ui/chat/widgets/turn_footnote.dart",
+    "effects": "app/lib/plugins/native/native_effects.dart",
+    "taps": "app/lib/ui/plugins/native/native_taps.dart",
 }
 
 
@@ -56,7 +61,7 @@ class AnchorIntentTests(unittest.TestCase):
         if not UPSTREAM.is_dir():
             raise RuntimeError("基线源码目录不存在，请设置 DSH_UPSTREAM_SRC: %s" % UPSTREAM)
         cls.plan, cls.newfiles = apply.build_plan(pathlib.Path("/"), "damemod/Dharness",
-                                                   False, True, True, True, True, True, True)
+                                                   False, True, True, True, True, True, True, True)
 
     def anchors_for(self, key):
         return [a for a in self.plan if a[0] == FILES[key]]
@@ -323,6 +328,42 @@ class AnchorIntentTests(unittest.TestCase):
         tiny = pick(len(narrow) - 1)
         self.assertFalse(tiny.endswith(note),
                          "room 不足最窄带 note 档时应退到无 note 档，实际 %r" % tiny)
+
+    def anchors_for_dismiss(self):
+        return [a for a in self.plan
+                if a[0] in (FILES["effects"], FILES["taps"])
+                and "dismiss" in a[2]]
+
+    def test_I15_dismiss_anchors_wired(self):
+        """I15：dismiss 两锚点在、唯一、产物识别 dismiss 并 pop 弹层。"""
+        anchors = self.anchors_for_dismiss()
+        self.assertEqual(len(anchors), 2, "dismiss 应恰好 2 个锚点（解析+执行）")
+        parse = next(a for a in anchors if a[0] == FILES["effects"])
+        run = next(a for a in anchors if a[0] == FILES["taps"])
+        self.assertIn("page == 'dismiss'", parse[2])
+        self.assertIn("out.add(OpenEffect(page: page))", parse[2])
+        self.assertIn("UiSchema.pages.contains(page)", parse[2],
+                      "dismiss 分支应插在 pages 分支前，不破坏原逻辑")
+        self.assertIn("id == 'dismiss'", run[2])
+        self.assertIn("nav.maybePop();", run[2])
+        self.assertLess(run[2].index("if (id == 'dismiss')"),
+                        run[2].index("final os = ref.read(operatingSystemProvider)"),
+                        "dismiss 拦截应在原有 os 逻辑之前")
+        self.assertEqual(self.count(read("effects"), parse[1]), 1)
+        self.assertEqual(self.count(read("taps"), run[1]), 1)
+
+    def test_I16_dismiss_fail_closed_on_duplicate(self):
+        """I16：dismiss 任一锚点重复时 preflight 在任何写入前拒绝。"""
+        for anchor in self.anchors_for_dismiss():
+            with self.subTest(path=anchor[0]):
+                with tempfile.TemporaryDirectory() as td:
+                    root = pathlib.Path(td)
+                    target = root / anchor[0]
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    target.write_text(anchor[1] + "\n" + anchor[1] + "\n", encoding="utf-8")
+                    self.assertEqual(self.count(target.read_text(encoding="utf-8"), anchor[1]), 2)
+                    with self.assertRaises(SystemExit):
+                        apply.preflight(root, [anchor], [])
 
 
 if __name__ == "__main__":

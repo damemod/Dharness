@@ -11,6 +11,7 @@
   --forum-default-empty     可选：论坛地址默认留空（需要时在设置里填，仍可用）。
   --recall-turn-id          可选：插件菜单 scope 补回合号，供消息尾注定位。
   --recall-footnote         可选：回合脚注窄屏时也保留并显示消息尾注。
+  --plugin-dismiss          可选：允许插件动作 open:'dismiss' 关闭当前弹层。
   --dry-run                 可选：只校验所有锚点，不写入任何文件。
 
 锚点分两类，由 old 字符串的前缀区分：
@@ -93,7 +94,7 @@ DATA_EXTRACTION_RULES = """<?xml version="1.0" encoding="utf-8"?>
 """
 
 
-def build_plan(root, repo, with_dex, telemetry_off, single_market, lazy_relay, forum_empty, recall_turn_id, recall_footnote):
+def build_plan(root, repo, with_dex, telemetry_off, single_market, lazy_relay, forum_empty, recall_turn_id, recall_footnote, plugin_dismiss):
     """返回补丁计划 [(rel, old, new)] 与新建文件计划 [(rel, content)]。"""
     plan = []
     newfiles = []
@@ -181,7 +182,7 @@ def build_plan(root, repo, with_dex, telemetry_off, single_market, lazy_relay, f
 
     if recall_turn_id:
         # 插件菜单 scope 补 turnId：从 AssistantChatItem.rowKey (m<turn>.<step>) 解析回合号，
-        # 让撤回尾注能贴到对应回复。精确串在文件内唯一，计数不符即失败。
+        # 让消息尾注能贴到对应回合。精确串在文件内唯一，计数不符即失败。
         plan.append((
             "app/lib/ui/plugins/native/message_plugin_menu.dart",
             "  final target = DshGoScope(sessionId: sessionId, messageId: messageId);",
@@ -208,6 +209,32 @@ def build_plan(root, repo, with_dex, telemetry_off, single_market, lazy_relay, f
             "app/lib/ui/chat/widgets/turn_footnote.dart",
             "                      child: notes != null && text == options.first",
             "                      child: notes != null && notes.text.isNotEmpty && text.endsWith(notes.text)",
+        ))
+
+    if plugin_dismiss:
+        # 通用弹层关闭：插件动作 open:'dismiss' 由 App 识别为关闭当前弹层。
+        # bridge 已放行该 page id；这里让 parseNativeEffects 接受它，避免未知页面报错。
+        plan.append((
+            "app/lib/plugins/native/native_effects.dart",
+            "        } else if (UiSchema.pages.contains(page)) {\n"
+            "          out.add(OpenEffect(page: page));",
+            "        } else if (page == 'dismiss') {\n"
+            "          out.add(OpenEffect(page: page));\n"
+            "        } else if (UiSchema.pages.contains(page)) {\n"
+            "          out.add(OpenEffect(page: page));",
+        ))
+        # 执行侧：openNativePage 遇到 dismiss 时 pop 当前弹层，而不是找对应页面。
+        plan.append((
+            "app/lib/ui/plugins/native/native_taps.dart",
+            "Future<void> openNativePage(BuildContext context, WidgetRef ref, String id, {String? sessionId}) async {\n"
+            "  final os = ref.read(operatingSystemProvider);",
+            "Future<void> openNativePage(BuildContext context, WidgetRef ref, String id, {String? sessionId}) async {\n"
+            "  if (id == 'dismiss') {\n"
+            "    final nav = Navigator.of(context);\n"
+            "    nav.maybePop();\n"
+            "    return;\n"
+            "  }\n"
+            "  final os = ref.read(operatingSystemProvider);",
         ))
 
     if with_dex:
@@ -241,7 +268,7 @@ def preflight(root, plan, newfiles):
 def main():
     args = sys.argv[1:]
     if len(args) < 2:
-        sys.exit("用法: apply_autonomous.py <src-dir> <owner/repo> [--with-data-extraction] [--telemetry-default-off] [--single-market-source] [--lazy-relay-login] [--forum-default-empty] [--recall-turn-id] [--recall-footnote] [--dry-run]")
+        sys.exit("用法: apply_autonomous.py <src-dir> <owner/repo> [--with-data-extraction] [--telemetry-default-off] [--single-market-source] [--lazy-relay-login] [--forum-default-empty] [--recall-turn-id] [--recall-footnote] [--plugin-dismiss] [--dry-run]")
     root = pathlib.Path(args[0])
     repo = args[1]
     opts = args[2:]
@@ -252,6 +279,7 @@ def main():
     forum_empty = False
     recall_turn_id = False
     recall_footnote = False
+    plugin_dismiss = False
     dry_run = False
     for o in opts:
         if o == "--with-data-extraction":
@@ -268,12 +296,14 @@ def main():
             recall_turn_id = True
         elif o == "--recall-footnote":
             recall_footnote = True
+        elif o == "--plugin-dismiss":
+            plugin_dismiss = True
         elif o == "--dry-run":
             dry_run = True
         else:
             sys.exit("未知参数: {!r}".format(o))
 
-    plan, newfiles = build_plan(root, repo, with_dex, telemetry_off, single_market, lazy_relay, forum_empty, recall_turn_id, recall_footnote)
+    plan, newfiles = build_plan(root, repo, with_dex, telemetry_off, single_market, lazy_relay, forum_empty, recall_turn_id, recall_footnote, plugin_dismiss)
     preflight(root, plan, newfiles)
     if dry_run:
         print("dry-run: 全部 {} 项补丁锚点 + {} 个新文件校验通过，未写入。".format(len(plan), len(newfiles)))
@@ -291,7 +321,8 @@ def main():
           "| 远程登录按需:", "是" if lazy_relay else "否",
           "| 论坛默认留空:", "是" if forum_empty else "否",
           "| 菜单补回合号:", "是" if recall_turn_id else "否",
-          "| 脚注保留尾注:", "是" if recall_footnote else "否")
+          "| 脚注保留尾注:", "是" if recall_footnote else "否",
+          "| 插件关闭弹层:", "是" if plugin_dismiss else "否")
 
 
 if __name__ == "__main__":

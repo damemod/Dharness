@@ -91,6 +91,15 @@ GUARDS: list[tuple[str, str, str]] = [
     ("app/lib/ui/chat/widgets/turn_footnote.dart",
      "notes.text.isNotEmpty && text.endsWith(notes.text)",
      "消息尾注在窄屏档也能上色"),
+     ("app/lib/plugins/native/native_effects.dart",
+      "} else if (page == 'dismiss') {",
+      "插件 open:'dismiss' 被识别为合法页面"),
+     ("app/lib/ui/plugins/native/native_taps.dart",
+      "if (id == 'dismiss') {",
+      "dismiss 动作进入关闭弹层分支"),
+     ("app/lib/ui/plugins/native/native_taps.dart",
+      "nav.maybePop();",
+      "dismiss 动作关闭当前弹层"),
     # 以下为上游安全默认值哨兵：这些文件未打补丁，仅监控默认值是否被改松。
     ("app/android/app/src/main/kotlin/io/github/ccch1mneyyy/dsh_app/phone/SafetyGate.kt",
      "val confirmMode: ConfirmMode = ConfirmMode.ASK",
@@ -141,6 +150,9 @@ FORBIDDEN: list[tuple[str, str, str]] = [
     ("app/lib/ui/chat/widgets/turn_footnote.dart",
      "text == options.first",
      "仅首档上色的旧条件已消失（双侧锚定）"),
+    ("app/lib/ui/plugins/native/native_taps.dart",
+     "Future<void> openNativePage(BuildContext context, WidgetRef ref, String id, {String? sessionId}) async {\n  final os = ref.read(operatingSystemProvider);",
+     "openNativePage 无弹层关闭拦截的旧形态已消失（双侧锚定）"),
 ]
 
 
