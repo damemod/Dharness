@@ -1,0 +1,16 @@
+{
+  "_source": "patches/apply_autonomous.py build_plan()，2026-11-20 实测；锚点数只许减不许增",
+  "_note": "build_plan 内所有对 plan 的写入全量基线，含无条件写入桶 __unconditional__ 与全部 flag 桶。新增 flag 或任一桶锚点增加即拒绝。_feature_flags 标注的是功能专用补丁税，其余是基础设施补丁。",
+  "_feature_flags": ["recall_turn_id", "recall_footnote", "plugin_dismiss", "recall_user_msg"],
+  "_unconditional_source": "build_plan 起始处两处无条件 plan.append（apply_autonomous.py:105 与 :112），更新源仓库常量与发布脚本仓库常量；属于通用基础设施补丁，非功能专用。",
+  "__unconditional__": 2,
+  "telemetry_off": 2,
+  "single_market": 5,
+  "lazy_relay": 2,
+  "forum_empty": 1,
+  "recall_turn_id": 1,
+  "recall_footnote": 2,
+  "plugin_dismiss": 2,
+  "recall_user_msg": 6,
+  "with_dex": 1
+}

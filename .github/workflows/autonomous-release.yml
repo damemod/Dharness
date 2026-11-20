@@ -116,6 +116,22 @@ jobs:
           fi
           echo "素材覆盖完成"
 
+      # 接缝快照脚本为纯 JS（import 桥模块读取安全常量、不参与 sha256 pin 工具链），
+      # 与文件顶部"跟随上游默认值的工具链"不是一回事；版本与 build-runtime.sh:45 默认一致。
+      - name: 配置 Node（接缝快照脚本运行时）
+        if: steps.tag.outputs.exists == 'false'
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24.22.1
+
+      - name: 接缝安全快照检查（发版同 tag，硬阻断）
+        if: steps.tag.outputs.exists == 'false'
+        run: |
+          set -euo pipefail
+          # upstream/ 来自"检出上游源码"步骤，ref 即本次发版的 $TAG。
+          # 对同一 tag 校验桥安全不变量；存在差异或硬红线失守即退出，阻断本轮发布。
+          python3 self/scripts/check_seam_security.py upstream
+
       - name: 应用最小改造补丁
         if: steps.tag.outputs.exists == 'false'
         run: |
